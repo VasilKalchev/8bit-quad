@@ -1,0 +1,240 @@
+###############################################################################
+## 8bit-quad                                                                 ##
+##                                                                           ##
+## Style:                                                                    ##
+##   Menu items are in all caps.                                             ##
+##   Menu options are in "PascalCase".                                       ##
+##                                                                           ##
+## Notes:                                                                    ##
+## Menu items with "[F]" appended to them, indicate that the program must be ##
+## uploaded with a programmer, in order for the setting to take effect.      ##
+##                                                                           ##
+## Warning: `build.core` must be specified outside a menu option.            ##
+###############################################################################
+
+
+## Menus items
+menu.CORE=Core
+menu.CLK_FREQ=Clock frequency
+menu.UP_SPEED=Upload speed [F]
+menu.BOD=Brown out detector [F]
+menu.BL=Bootloader [F]
+menu.EEPROM=EEPROM [F]
+menu.OPTIMIZATION=Optimization
+menu.SOLUTION=Solution
+## -----------
+
+
+## Flight controller ##########################################################
+fc.name=8bit-quad_fc
+
+fc.build.board=BOARD_8BIT_QUAD_FC
+fc.build.mcu=atmega328p
+fc.build.variant=standard
+
+fc.upload.tool=avrdude
+fc.upload.maximum_data_size=2048
+
+fc.bootloader.tool=avrdude
+fc.bootloader.unlock_bits=0x3F
+fc.bootloader.lock_bits=0x0F
+fc.bootloader.low_fuses=0xFF
+
+fc.serial.disableDTR=false
+fc.serial.disableRTS=false
+
+
+## CORE -----------------------------------------------------------------------
+fc.build.core=swap_tmr0_with_tmr2
+
+fc.menu.CORE.SwapTmr2WithTmr0=Swap TMR2 with TMR0 (default)
+fc.menu.CORE.SwapTmr2WithTmr0.build.core=swap_tmr0_with_tmr2
+## ----------------------------------------------------------------------------
+
+## CLK_FREQ -------------------------------------------------------------------
+fc.menu.CLK_FREQ.16MHz=16MHz
+fc.menu.CLK_FREQ.16MHz.build.f_cpu=16000000L
+
+fc.menu.CLK_FREQ.20MHz=20MHz
+fc.menu.CLK_FREQ.20MHz.build.f_cpu=20000000L
+## ----------------------------------------------------------------------------
+
+## UP_SPEED -------------------------------------------------------------------
+fc.menu.UP_SPEED.115200=115200 baud
+fc.menu.UP_SPEED.115200.upload.speed=115200
+
+fc.menu.UP_SPEED.250000=250000 baud
+fc.menu.UP_SPEED.250000.upload.speed=250000
+## ----------------------------------------------------------------------------
+
+## BOD ------------------------------------------------------------------------
+fc.menu.BOD.4V3=4.3V
+fc.menu.BOD.4V3.bootloader.extended_fuses=0xFC
+
+fc.menu.BOD.2V7=2.7V
+fc.menu.BOD.2V7.bootloader.extended_fuses=0xFD
+
+fc.menu.BOD.1V8=1.8V
+fc.menu.BOD.1V8.bootloader.extended_fuses=0xFE
+
+fc.menu.BOD.Disabled=Disabled
+fc.menu.BOD.Disabled.bootloader.extended_fuses=0xFF
+## ---------------------------------------------------------------------------
+
+## EEPROM ---------------------------------------------------------------------
+fc.menu.EEPROM.keep=Preserve
+fc.menu.EEPROM.keep.bootloader.eesave_bit=0
+
+fc.menu.EEPROM.erase=Erase (only when using programmer)
+fc.menu.EEPROM.erase.bootloader.eesave_bit=1
+## ----------------------------------------------------------------------------
+
+## BL -------------------------------------------------------------------------
+fc.menu.BL.Optiboot=Optiboot
+fc.menu.BL.Optiboot.bootloader.file=optiboot/optiboot_{build.mcu}_{build.f_cpu}_{upload.speed}baud.hex
+fc.menu.BL.Optiboot.bootloader.high_fuses=0b1101{bootloader.eesave_bit}110
+fc.menu.BL.Optiboot.upload.maximum_size=32256
+fc.menu.BL.Optiboot.upload.protocol=arduino
+
+fc.menu.BL.None=None
+fc.menu.BL.None.bootloader.high_fuses=0b1101{bootloader.eesave_bit}111
+fc.menu.BL.None.upload.maximum_size=32768
+## ----------------------------------------------------------------------------
+
+## OPTIMIZATION----------------------------------------------------------------
+## Only -Os fits in flash, so it's first (the first option is the default).
+fc.menu.OPTIMIZATION.Os=Os
+fc.menu.OPTIMIZATION.Os.build.optimization=-Os
+
+fc.menu.OPTIMIZATION.O0=O0
+fc.menu.OPTIMIZATION.O0.build.optimization=-O0
+
+fc.menu.OPTIMIZATION.O1=O1
+fc.menu.OPTIMIZATION.O1.build.optimization=-O1
+
+fc.menu.OPTIMIZATION.O2=O2
+fc.menu.OPTIMIZATION.O2.build.optimization=-O2
+
+fc.menu.OPTIMIZATION.O3=O3
+fc.menu.OPTIMIZATION.O3.build.optimization=-O3
+
+fc.menu.OPTIMIZATION.Ofast=Ofast
+fc.menu.OPTIMIZATION.Ofast.build.optimization=-Ofast
+## ----------------------------------------------------------------------------
+
+## SOLUTION -------------------------------------------------------------------
+fc.menu.SOLUTION.Debug=Debug
+fc.menu.SOLUTION.Debug.build.extra_flags=-DDEBUG
+fc.menu.SOLUTION.Debug.build.debug=true
+
+fc.menu.SOLUTION.Release=Release
+fc.menu.SOLUTION.Release.build.extra_flags=-DRELEASE
+fc.menu.SOLUTION.Release.build.debug=false
+## ----------------------------------------------------------------------------
+
+###############################################################################
+
+
+## Remote controller ##########################################################
+rc.name=8bit-quad_rc
+
+rc.build.board=BOARD_8BIT_QUAD_RC
+rc.build.mcu=atmega328p
+rc.build.variant=standard
+rc.build.f_cpu=16000000L
+
+rc.upload.tool=avrdude
+rc.upload.maximum_data_size=2048
+
+rc.bootloader.tool=avrdude
+rc.bootloader.unlock_bits=0x3F
+rc.bootloader.lock_bits=0x0F
+rc.bootloader.low_fuses=0xFF
+
+rc.serial.disableDTR=false
+rc.serial.disableRTS=false
+
+
+## CORE -----------------------------------------------------------------------
+rc.build.core=swap_tmr0_with_tmr2
+
+rc.menu.CORE.SwapTmr2WithTmr0=Swap TMR2 with TMR0 (default)
+rc.menu.CORE.SwapTmr2WithTmr0.build.core=swap_tmr0_with_tmr2
+
+rc.menu.CORE.Arduino=Arduino
+rc.menu.CORE.Arduino.build.core=arduino:arduino
+## ----------------------------------------------------------------------------
+
+## UP_SPEED ---------------------------------------------------------------
+rc.menu.UP_SPEED.115200=115200 baud
+rc.menu.UP_SPEED.115200.upload.speed=115200
+
+rc.menu.UP_SPEED.250000=250000 baud
+rc.menu.UP_SPEED.250000.upload.speed=250000
+## ----------------------------------------------------------------------------
+
+## BOD ------------------------------------------------------------------------
+rc.menu.BOD.4V3=4.3V
+rc.menu.BOD.4V3.bootloader.extended_fuses=0xFC
+
+rc.menu.BOD.2V7=2.7V
+rc.menu.BOD.2V7.bootloader.extended_fuses=0xFD
+
+rc.menu.BOD.1V8=1.8V
+rc.menu.BOD.1V8.bootloader.extended_fuses=0xFE
+
+rc.menu.BOD.Disabled=Disabled
+rc.menu.BOD.Disabled.bootloader.extended_fuses=0xFF
+## ---------------------------------------------------------------------------
+
+## BL -------------------------------------------------------------------------
+rc.menu.BL.Optiboot=Optiboot
+rc.menu.BL.Optiboot.bootloader.file=optiboot/optiboot_{build.mcu}_{build.f_cpu}_{upload.speed}baud.hex
+rc.menu.BL.Optiboot.bootloader.high_fuses=0b1101{bootloader.eesave_bit}110
+rc.menu.BL.Optiboot.upload.maximum_size=32256
+rc.menu.BL.Optiboot.upload.protocol=arduino
+
+rc.menu.BL.None=None
+rc.menu.BL.None.bootloader.high_fuses=0b1101{bootloader.eesave_bit}111
+rc.menu.BL.None.upload.maximum_size=32768
+## ----------------------------------------------------------------------------
+
+## EEPROM ---------------------------------------------------------------------
+rc.menu.EEPROM.keep=Preserve
+rc.menu.EEPROM.keep.bootloader.eesave_bit=0
+
+rc.menu.EEPROM.erase=Erase (only when using programmer)
+rc.menu.EEPROM.erase.bootloader.eesave_bit=1
+## ----------------------------------------------------------------------------
+
+## OPTIMIZATION----------------------------------------------------------------
+rc.menu.OPTIMIZATION.Os=Os
+rc.menu.OPTIMIZATION.Os.build.optimization=-Os
+
+rc.menu.OPTIMIZATION.O0=O0
+rc.menu.OPTIMIZATION.O0.build.optimization=-O0
+
+rc.menu.OPTIMIZATION.O1=O1
+rc.menu.OPTIMIZATION.O1.build.optimization=-O1
+
+rc.menu.OPTIMIZATION.O2=O2
+rc.menu.OPTIMIZATION.O2.build.optimization=-O2
+
+rc.menu.OPTIMIZATION.O3=O3
+rc.menu.OPTIMIZATION.O3.build.optimization=-O3
+
+rc.menu.OPTIMIZATION.Ofast=Ofast
+rc.menu.OPTIMIZATION.Ofast.build.optimization=-Ofast
+## ----------------------------------------------------------------------------
+
+## SOLUTION -------------------------------------------------------------------
+rc.menu.SOLUTION.Debug=Debug
+rc.menu.SOLUTION.Debug.build.extra_flags=-DDEBUG
+rc.menu.SOLUTION.Debug.build.debug=true
+
+rc.menu.SOLUTION.Release=Release
+rc.menu.SOLUTION.Release.build.extra_flags=-DRELEASE
+rc.menu.SOLUTION.Release.build.debug=false
+## ----------------------------------------------------------------------------
+
+###############################################################################

@@ -1,0 +1,1 @@
+Timers 0 and 2 are swapped for the purpose of using PB3 as PWM pin.

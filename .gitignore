@@ -1,0 +1,17 @@
+# Arduino IDE / arduino-cli build output
+build/
+*.hex
+*.elf
+# ...but the custom core's prebuilt bootloaders are source, not build output
+# (boards.txt points burn-bootloader at these .hex files).
+!hardware/**/bootloaders/**/*.hex
+!hardware/**/bootloaders/**/*.elf
+
+# Editor/IDE cruft
+*.sublime-project
+*.sublime-workspace
+.vs/
+.vscode/
+
+# OS related
+.directory
