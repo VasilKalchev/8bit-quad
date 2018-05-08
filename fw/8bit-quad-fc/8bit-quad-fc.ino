@@ -1,1177 +1,832 @@
-#include "src/config/config.hpp"
-#include "src/util/debug.hpp"
-#include "src/board/8bit-quad-fc_board.hpp"
-#include "src/peripheral/ADC.hpp"
-#include "UART_atmega328.hpp"
-#include "src/imu/MPU9255.hpp"
-#include "src/control/PID.hpp"
-#include "src/radio/nRF24L01p.hpp"
-#include "src/peripheral/eeprom.hpp"
-#include "src/util/utils.hpp"
+// License...
 
-#include <MahonyAHRS.hpp>
-Mahony mahony(1.0f / 322.0f); // sample period, seconds (322 Hz)
+/* TODO:
+// turn off if large acceleration and not moving
 
-#include <i2c_BMP280.h>
-BMP280 bmp;
-float takeOffAltitude = 0.0f;
-float takeOffPressure = 0.0f;
-float relativeAltitude = 0.0f;
-float recordRelativeAltitude = 0.0f;
-const float seaLevelPressure = 101325.0f;
+// Self tests with fake data
+// set angular velocity z to positive value - check if motors react
+// set control pitch to left - check if motors react
+// check if Eaccel == 1g
+// check if Eav == 0
+// check if Az == 1g
+// check if integrating correctly (pids and av yaw)
+// check if loop time is constant and under certain value
+*/
 
-using namespace m328;
+/* TOC
 
-float verticalVelocity = 0.0f;
-int16_t verticalVelocity_setpoint = 0;
-int16_t verticalVelocity_output = 0;
-PID verticalVelocity_pid(&verticalVelocity_setpoint, &verticalVelocity, &verticalVelocity_output);
+*/
 
-bool altitudeHold = false;
-uint32_t altitudeHoldSetTime = 0;
-const uint32_t altitudeHoldTimeOut = 5000000;
+// Nonvolatile preference increment based on data type
 
-float recordClimbSpeed = 0.0f;
-float recordFallSpeed = 0.0f;
-
-const uint16_t recordClimbSpeed_address = 250;
-const uint16_t recordFallSpeed_address = 260;
-const uint16_t recordRelativeAltitude_address = 280;
-
-struct Str {
-  uint16_t b_mv;
-  uint16_t rc;
-};
-
-// #include "AK8963_I2C.hpp"
-// AK8963_I2C compass;
-// float mx = 0.0;
-// float my = 0.0;
-// float mz = 0.0;
+#define F_CPU 16000000
 
 
-namespace imu {
-MPU9255 mpu6050(config::imu::i2cAddress);
-} //namespace imu
-AngularVelocity angularVelocity;
-Acceleration acceleration;
-Attitude attitude;
-float avPitch = 0.0f;
-float avRoll = 0.0f;
-float avYaw = 0.0;
+#include "MAD-FC-2a_config.hpp"
+
+/* MAD-FC-2a_debug defines macros 'DEBUG_INITIALIZE(baud)', 'DEBUG(...)'
+   and 'DEBUGLN(...)' based on the definition of 'DEBUGGING' in
+   MAD-FC-2a_config.hpp. This allows turning on/off UART debugging
+   messages from a single place. */
+#include "MAD-FC-2a_debug.hpp"
+
+/* MAD-FC-2a_board defines how the microcontroller is connected to board
+   "2a" and provides functions for controlling the basic peripherals. */
+#include "MAD-FC-2a_board.hpp"
+
+#include <MAD-DataTypes.hpp>
+#include <MAD-Utils.hpp>
+
+/* UART_atmega328 library is an alternative to the Arduino's library for
+   working with the UART. It is specifically for the ATmega328, it lacks a
+   lot of functionality and is meant to be used for simple debugging
+   messages while eliminating the requirement of using the Arduino's IDE. */
+#include <UART_atmega328.hpp> // https://github.com/VaSe7u/UART_atmega328
+
+/* ADC_atmega328 library is an alternative to the Arduino's functions for
+   working with the ADC. It is specifically for the ATmega328 and provides
+   functions for setting a trigger source and changing the ADC circuit's
+   operating frequency. */
+#include <ADC_atmega328.hpp> // https://github.com/VaSe7u/ADC_atmega328
+
+#include <MPU925x_I2C.hpp> // https://github.com/VaSe7u/MPU925x_I2C
+#include <AK8963_I2C.hpp> // https://github.com/VaSe7u/AK8963_I2C
+#include <i2c_BMP280.h> // https://github.com/orgua/iLib
+
+/* MahonyAHRS is a library implementing Mahony's orientation filter for
+   fusing accelerometer, gyroscope and possibly magnetometer.
+   This is a fork of https://github.com/PaulStoffregen/MahonyAHRS, the
+   main difference is that angular velocity is passed to the filter in
+   radians/s. */
+#include <MahonyAHRS.h> // https://github.com/VaSe7u/MahonyAHRS
+
+#include <PIDcontroller.hpp> // https://github.com/VaSe7u/PIDcontroller
+
+#include <avr/wdt.h>
 
 
-namespace comm {
-nRF24L01p_RF24 rf24(Role::drone, pin::communication::ino::ce, pin::communication::ino::csn);
-} //namespace comm
-Command command;
-int16_t throttle = 0;
-
-namespace pid {
-
-namespace inner {
-namespace setpoint {
-int16_t pitch = 0;
-int16_t roll = 0;
-} //namespace setpoint
-namespace output {
-int16_t pitch = 0;
-int16_t roll = 0;
-int16_t yaw = 0;
-} //namespace output
-Pcontroller pitch(&setpoint::pitch, &angularVelocity.x, &output::pitch);
-Pcontroller roll(&setpoint::roll, &angularVelocity.y, &output::roll);
-PID yaw(&command.yaw, &avYaw, &output::yaw);
-} //namespace inner
-
-namespace outer {
-PID pitch(&command.pitch, &attitude.pitch, &inner::setpoint::pitch);
-PID roll(&command.roll, &attitude.roll, &inner::setpoint::roll);
-} //namespace outer
-
-} //namespace pid
+/* This function makes sure that the code that follows it, is executed at
+   a constant period. It uses the cycle period, which is specified manually
+   in MAD-FC-2a_config.hpp based on the longest time it takes for a cycle to
+   complete with SYNCHRONIZE turned off and the last time (in microseconds)
+   this part of the code was reached. The argument "lastMicroseconds" is
+   passed as a reference and is automatically updated. */
+void syncCycle(uint32_t& lastMicroseconds) {
+# if SYNCHRONIZE
+  while (us() - lastMicroseconds < config::cyclePeriod) {}
+  lastMicroseconds = us();
+# else
+#   warning "SYNCHRONIZE is off!"
+  lastMicroseconds = lastMicroseconds;
+# endif
+}
 
 
-namespace status {
-Status communication = Status::normal;
-Status battery = Status::normal;
-} //namespace status
+// Function prototypes.
+void updateIndication();
+float readBattery();
+void updateTelemetryMessage();
+void adjustControllers();
+void updateTelemetryMessage();
+bool commandHandler();
+bool settingHandler();
 
 
-float batteryVoltage = 0.0;
+int main() {
+  wdt_disable();
+
+  // MAD-FC-2a-board.hpp
+  board::initializeTimers();
+  /* Configures timer 0 and 1 for 490Hz Fast PWM for the motors
+     and timer 2 for counting the microseconds since boot. */
+  board::initIO(); // Configures the pins for input or output.
+
+  board::indication::signal(false);
+  board::indication::warning(true);
+  board::indication::arms(0);
+  board::indication::lamp(false);
+  // Only red LED is lit while initializing.
 
 
-
-void handleCommand();
-void handleSetting(Setting & setting);
-
-#define EXACT_TIMING true
-#if EXACT_TIMING
-#  define WAIT_FOR_CYCLE(LUS) while (micros() - LUS < config::cycleTime);
-#else
-#  define WAIT_FOR_CYCLE(LUS)
-#endif
-// #define DT round(config::cycleTime / 1000000);
+  DEBUG_INITIALIZE(config::debug::baud);
+  DEBUG("MAD-FC-2a\n=========\n\n");
 
 
-void setup() {
-  bool success = true;
-
-  replaceTimer0WithTimer2();
-
-  initIO();
-  indication::signal(OFF);
-  indication::warning(ON);
-  indication::arms(OFF);
-
-  Wire.begin();
-  Wire.setClock(400000);
-
-  INIT_UART(config::debug::baud);
-  uart::initialize(config::debug::baud);
-  // Serial.begin(config::debug::baud);
-  DEBUGLN("FC2.\n");
-
-  config::init();
-#if DEBUG_SETTINGS
-  DEBUGLN("  SETTINGS");
-  DEBUG("  Telemetry type: "); DEBUGLN(config::communication::telemetry::type());
-  DEBUG("  Pi: "); DEBUGLN(config::regulation::inner::P());
-  DEBUG("  Pi_yaw: "); DEBUGLN(config::regulation::inner::yawP());
-  DEBUG("  Po: "); DEBUGLN(config::regulation::outer::P());
-  DEBUG("  Io: "); DEBUGLN(config::regulation::outer::I());
-  DEBUG("  Arms level (0-12): "); DEBUGLN(config::indication::armsLevel());
-  DEBUG("  Lamp: "); if (config::indication::lamp()) {DEBUGLN("ON");} else {DEBUGLN("OFF");}
-  DEBUGLN("  -----\n");
-#endif
-
-  initADC();
-
-  // IMU initialization
-  DEBUG("IMU");
-  success &= imu::mpu6050.initialize();
-  // imu::mpu6050.setDLPFMode(config::imu::lowPassFilter::common());
-  DEBUG(" done. T = "); DEBUG(imu::mpu6050.getTemperature()); DEBUGLN("degC.");
-  // Wire.setClock(400000);
-  Wire.setClock(800000);
-  // ~IMU initialization -----
+  // Global objects.
+  // ===============
+  adc::initialize(adc::Reference::INTERNAL1V1); // link to API
+  adc::setAutoTriggerSource(adc::AutoTriggerSource::FreeRunningMode);
 
 
-  // Communication initialization
-  DEBUG("Communication");
-  comm::rf24.initialize();
-  comm::rf24.setPALevel(RF24_PA_MAX);
-  //RF24_PA_MIN = 0,RF24_PA_LOW, RF24_PA_HIGH, RF24_PA_MAX, RF24_PA_ERROR - rf24_pa_dbm_e;
-  comm::rf24.setDataRate(RF24_2MBPS);
-  //RF24_1MBPS = 0, RF24_2MBPS, RF24_250KBPS - rf24_datarate_e;
-  comm::rf24.setRetries(config::communication::retryDelay, config::communication::retryCount);
-  comm::rf24.setCRCLength(config::communication::crcLength);
-  success &= comm::rf24.isChipConnected();
-  if (comm::rf24.isChipConnected()) { DEBUGLN(" done."); }
-  // ~Communication initialization -----
+  namespace imu {
+  MPU925x_I2C mpu; // link to API
+  bool init = true;
+  mpu.initialize();
+  init &= mpu.setAccelFullScaleRange(config::imu::mpu925x::accelerometer::range);
+  init &= mpu.setGyroFullScaleRange(config::imu::mpu925x::gyroscope::range);
+  init &= mpu.setAccelDLPF(config::imu::mpu925x::accelerometer::dlpf);
+  init &= mpu.setGyroDLPF(config::imu::mpu925x::gyroscope::dlpf);
+  mpu.setXAccelOffset(board::imu::mpu925x::offset::accelerometer::x());
+  mpu.setYAccelOffset(board::imu::mpu925x::offset::accelerometer::y());
+  mpu.setZAccelOffset(board::imu::mpu925x::offset::accelerometer::z());
+  mpu.setXGyroOffset (board::imu::mpu925x::offset::gyroscope::x());
+  mpu.setYGyroOffset (board::imu::mpu925x::offset::gyroscope::y());
+  mpu.setZGyroOffset (board::imu::mpu925x::offset::gyroscope::z());
+  init &= mpu.testConnection();
 
-  // Regulation initialization
-  // DEBUG("Regulation");
-  success &= pid::inner::pitch.setTunings(config::regulation::inner::P());
-  success &= pid::inner::roll.setTunings(config::regulation::inner::P());
-  success &= pid::inner::yaw.setTunings(config::regulation::inner::yawP(),
-                                        config::regulation::inner::yawI);
-  success &= pid::inner::pitch.setOutputLimits(config::regulation::inner::outputLimit);
-  success &= pid::inner::roll.setOutputLimits(config::regulation::inner::outputLimit);
-  success &= pid::inner::yaw.setOutputLimits(config::regulation::inner::outputLimit);
-  success &= pid::inner::yaw.setIntegralLimit(2);
-  pid::inner::pitch.on(); pid::inner::roll.on(); pid::inner::yaw.on();
-
-  success &= pid::outer::pitch.setTunings(config::regulation::outer::P(), config::regulation::outer::I());
-  success &= pid::outer::roll.setTunings(config::regulation::outer::P(), config::regulation::outer::I());
-  pid::outer::pitch.setUpdateRate(config::regulation::outer::updateRate);
-  pid::outer::roll.setUpdateRate(config::regulation::outer::updateRate);
-  success &= pid::outer::pitch.setOutputLimits(config::regulation::outer::outputLimit);
-  success &= pid::outer::roll.setOutputLimits(config::regulation::outer::outputLimit);
-  success &= pid::outer::pitch.setIntegralLimit(64);
-  success &= pid::outer::roll.setIntegralLimit(64);
-  pid::outer::pitch.on(); pid::outer::roll.on();
-
-  // eeprom::write((const uint16_t)155, (const float)0.5f);
-  // eeprom::write((const uint16_t)160, (const float)0.2f);
-  verticalVelocity_pid.setTunings(0.0f, 15.0f, 1.0f);
-  verticalVelocity_pid.setUpdateRate(5000);
-  verticalVelocity_pid.setOutputLimits(85); // more accurate velocity, outer pid...
-  verticalVelocity_pid.setIntegralLimit(0, 85);
-  verticalVelocity_pid.on();
-  // DEBUGLN(" done.");
-  // ~Regulation initialization -----
+  // AK8963_I2C compass;
+  } //namespace imu
 
 
-#  define ZERO_RECORDS false // zero records only if V < 5
-#  if ZERO_RECORDS
-  eeprom_busy_wait();
-  eeprom::write(recordClimbSpeed_address, 0.0f);
-  eeprom_busy_wait();
-  eeprom::write(recordFallSpeed_address, 0.0f);
-  eeprom_busy_wait();
-  eeprom::write(recordRelativeAltitude_address, 0.0f);
-#  endif
-  for (uint16_t i = 300; i < 1010; i += 4) {
-    uint16_t b = 0;
-    uint16_t c = 0;
-#   if ZERO_RECORDS
-    eeprom_busy_wait();
-    eeprom::update(i, b);
-    eeprom_busy_wait();
-    eeprom::update(i + 2, c);
-#   endif
-    eeprom_busy_wait();
-    eeprom::read(i, b);
-    eeprom_busy_wait();
-    eeprom::read(i + 2, c);
-    Serial.print(b); Serial.print("\t");
-    Serial.println(c);
-  }
-
+  namespace altimeter {
+  BMP280 bmp;
+  bool init = true;
   bmp.initialize();
-  bmp.setPressureOversampleRatio(16);
-  bmp.setTemperatureOversampleRatio(2);
-  bmp.setFilterRatio(16);
-  bmp.setStandby(0);
+  bmp.setPressureOversampleRatio(config::altimeter::bmp280::pressureOversampleRatio);
+  bmp.setTemperatureOversampleRatio(config::altimeter::bmp280::temperatureOversampleRatio);
+  bmp.setFilterRatio(config::altimeter::bmp280::filterRatio);
+  bmp.setStandby(config::altimeter::bmp280::standbyTime);
   bmp.setEnabled(true);
+  } //namespace altimeter
 
-  float p = 0.0f;
-  float t = 0.0f;
-  for (uint16_t i = 0; i < 500; ++i) {
-    bmp.read(p, t);
+
+  namespace fusion {
+  Mahony mahony(config::cyclePeriod);
+  mahony.setP(config::fusion::mahony::p);
+  mahony.setI(config::fusion::mahony::i);
+  } //namespace fusion
+
+
+  namespace controller {
+  bool init = true;
+  namespace inner {
+
+  const PIDconfig pitchAndRollConfig;
+  pitchAndRollConfig.state = true;
+  pitchAndRollConfig.p = config::controller::inner::p();
+  pitchAndRollConfig.updatePeriod = config::controller::inner::updatePeriod;
+  pitchAndRollConfig.minimalOutput = 0 - config::controller::inner::outputRange;
+  pitchAndRollConfig.maximalOutput = config::controller::inner::outputRange;
+
+  const PIDconfig yawConfig;
+  yawConfig.state = true;
+  yawConfig.p = config::controller::inner::yaw::p();
+  yawConfig.i = config::controller::inner::yaw::i();
+  yawConfig.updatePeriod = config::controller::inner::updatePeriod;
+  yawConfig.minimalOutput = 0 - config::controller::inner::outputRange;
+  yawConfig.maximalOutput = config::controller::inner::outputRange;
+  yawConfig.maximalNegativeIntegralSum = 0 - config::controller::inner::yaw::maximalIntegralSum;
+  yawConfig.maximalPositiveIntegralSum = config::controller::inner::yaw::maximalIntegralSum;
+
+  PIDcontroller pitch;
+  init &= pitch.config(pitchAndRollConfig);
+  PIDcontroller roll;
+  init &= roll.config(pitchAndRollConfig);
+  PIDcontroller yaw;
+  init &= yaw.config(yawConfig);
+  } //namespace inner
+
+  namespace outer {
+
+  const PIDconfig pitchAndRollConfig;
+  pitchAndRollConfig.state = true;
+  pitchAndRollConfig.p = config::controller::outer::p();
+  pitchAndRollConfig.i = config::controller::outer::i();
+  pitchAndRollConfig.updatePeriod = config::controller::outer::updatePeriod;
+  pitchAndRollConfig.minimalOutput = 0 - config::controller::outer::outputRange;
+  pitchAndRollConfig.maximalOutput = config::controller::outer::outputRange;
+  pitchAndRollConfig.maximalNegativeIntegralSum = 0 - config::controller::outer::maximalIntegralSum;
+  pitchAndRollConfig.maximalPositiveIntegralSum = config::controller::outer::maximalIntegralSum;
+
+  PIDcontroller pitch;
+  init &= pitch.config(pitchAndRollConfig);
+  PIDcontroller roll;
+  init &= roll.config(pitchAndRollConfig);
+  } //namespace outer
+  } //namespace controller
+
+
+  namespace com {
+  RF24 rf24(7, 8); // Arduino pins 7 and 8.
+  bool init = true;
+  rf24.begin();
+  rf24.setPALevel((rf24_pa_dbm_e)config::communication::nrf24l01p::paLevel);
+  rf24.setDataRate((rf24_datarate_e)config::communication::nrf24l01p::dataRate);
+  rf24.setRetries(config::communication::nrf24l01p::retriesCount,
+                  config::communication::nrf24l01p::retriesDelay);
+  rf24.setCRCLength((rf24_crclength_e)config::communication::nrf24l01p::crcLength);
+  rf24.enableAckPayload();
+  rf24.enableDynamicPayloads();
+  rf24.enableDynamicAck();
+  rf24.setAddressWidth(config::communication::nrf24l01p::addressWidth);
+  uint8_t writingPipe[] = {config::communication::remotePipe,
+                           config::communication::pipe, config::communication::pipe
+                          };
+  uint8_t readingPipe[] = {config::communication::dronePipe,
+                           config::communication::pipe, config::communication::pipe
+                          };
+  rf24.openWritingPipe(writingPipe);
+  rf24.openReadingPipe(1, readingPipe);
+  rf24.startListening();
+  init = rf24.testConnection();
+  } //namespace com
+
+  // ---------------
+  // ===============
+
+
+  if (!imu::init || !com::init || !controller::init || !altimeter::init) {
+    DEBUG("Failed initializing:");
+    if (!imu::init) DEBUG(" IMU");
+    if (!com::init) DEBUG(" communication");
+    if (!controller::init) DEBUG(" controller");
+    if (!altimeter::init) DEBUG(" altimeter");
+    DEBUGLN("!");
+    while (1) {
+      board::indication::warningToggle(); _delay_ms(100);
+    }
   }
-  float pSum = 0.0f;
-  float tSum = 0.0f;
-  const uint16_t samples = 400;
-  for (uint16_t i = 0; i < samples; ++i) {
-    bmp.read(p, t);
-    pSum += p;
-    tSum += t;
-  }
-  p = pSum / samples;
-  t = tSum / samples;
+  board::indication::signal(true);
+  board::indication::warning(false);
+  board::indication::arms(0);
+  board::indication::lamp(config::indication::lampState());
 
-  takeOffPressure = p;
-  takeOffAltitude = calculateAltitude(p, seaLevelPressure, t);
-  uart::print("P: "); uart::print(p);
-  uart::print("Pa, A: "); uart::print(takeOffAltitude);
-  eeprom::read(recordRelativeAltitude_address, recordRelativeAltitude);
-  uart::print("m, RRA: "); uart::print(recordRelativeAltitude); uart::print("m\n");
+  // Read battery voltage
+  // if Vb < 5 print settings and records and enable recording records
 
-  eeprom::read(recordClimbSpeed_address, recordClimbSpeed);
-  uart::print("Rec climb speed: "); uart::print(recordClimbSpeed); uart::print("kph\n");
-
-  eeprom::read(recordFallSpeed_address, recordFallSpeed);
-  uart::print("Rec fall speed: "); uart::print(recordFallSpeed); uart::print("kph\n");
-
-  // compass.powerUp();
-  // compass.initialize();
-  // compass.setResolution(BITS_16);
-  // compass.setMode(Mode::CONTINUOUS_MEASUREMENT_100HZ);
-  // // self test if fail disable mag
-  // Wire.setClock(800000);
+  wdt_reset();
+  wdt_enable(WDTO_2S);
 
 
-  if (!success) { DEBUG("Wrong initialization configuration! Terminated."); exit(0); }
-  indication::signal(ON);
-  indication::warning(OFF);
-  indication::lamp(config::indication::lamp());
-  // indication::arms(0);
-  // DEBUGLN("Setup done.\n----------");
-} //void setup()
+  for (;;) {
+    wdt_reset();
+
+    // Cycles.
+    // -------
+    static int8_t thisCycle = 0;
+    if (thisCycle > config::cycles) thisCycle = 0; // 3 cycles: 0, 1, 2
+    else ++thisCycle;
+    // -------
+
+    static uint32_t usThisCycle = us();
+#   if DEBUG_CYCLE_PERIOD
+    uart::print("CP: "); uart::println(us() - usThisCycle);
+#   endif
+    usThisCycle = us(); // Calculate us() once for non-critical usage.
 
 
-void loop() {
-  static uint32_t microsThisCycle = micros();
-  // static uint32_t microsNow = microsThisCycle;
+    // Read the IMU.
+    // =============
+    static mad::imu::AccelerationRaw accelerationRaw;
+    static mad::imu::AngularVelocityRaw angularVelocityRaw;
+    /* The accelerations and angular velocities are persistent
+       in case the read fails. */
+    imu.getAccelAndGyroRaw(&accelerationRaw.x, &accelerationRaw.y, &accelerationRaw.z,
+                           &angularVelocityRaw.x, &angularVelocityRaw.y, &angularVelocityRaw.z);
 
-#if DEBUG_LOOP_TIME
-  uart::print(micros() - microsThisCycle);
-  // indication::toggleLamp();
-#endif
+    // Convert gyroscope's raw output to radians/s.
+    // AV[deg/s] = Raw output / LSB/(deg/s)
+    // AV[rad/s] = Raw output / LSB/(deg/s) * pi/180
+    static mad::imu::AngularVelocity angularVelocityRadS;
+    angularVelocityRadS.x = imu.gyroRawToRadS(angularVelocityRaw.x);
+    angularVelocityRadS.y = imu.gyroRawToRadS(angularVelocityRaw.y);
+    angularVelocityRadS.z = imu.gyroRawToRadS(angularVelocityRaw.z);
 
-  microsThisCycle = micros();
+    // static mad::imu::MagneticFieldRaw magneticFieldRaw;
+    // compass.getMagneticFieldRaw(&magneticFieldRaw.x, &magneticFieldRaw.y, &magneticFieldRaw.z);
+    /* No need to convert the accelerations and magnetic fields because
+       they are normalised by the Mahony filter. */
+
+    // float pressure = 0.0f;
+    // float temperature = 0.0f;
+    // altimeter::bmp.read(pressure, temperature);
+    // static float takeOffPressure = pressure;
+
+#   if DEBUG_ANGULAR_VELOCITY
+    uart::print(imu.gyroRawToDegS(angularVelocityRaw.x)); uart::print(", ");
+    uart::print(imu.gyroRawToDegS(angularVelocityRaw.y)); uart::print(", ");
+    uart::print(imu.gyroRawToDegS(angularVelocityRaw.z)); uart::print("\n");
+#   endif
+#   if DEBUG_ACCELERATION
+    uart::print(accelerationRaw.x); uart::print(", ");
+    uart::print(accelerationRaw.y); uart::print(", ");
+    uart::print(accelerationRaw.z); uart::print("\n");
+#   endif
+#   if DEBUG_MAGNETIC_FIELD
+    uart::print(magneticFieldRaw.x); uart::print(", ");
+    uart::print(magneticFieldRaw.y); uart::print(", ");
+    uart::print(magneticFieldRaw.z); uart::print("\n");
+#   endif
+#   if DEBUG_PRESSURE
+    uart::print(pressure); uart::print("\n");
+#   endif
+    // =============
 
 
-  // Regulation
-  static uint32_t innerComputeLUS = microsThisCycle;
-  WAIT_FOR_CYCLE(innerComputeLUS);
-  innerComputeLUS = micros();
-  pid::inner::yaw.compute();
-  pid::inner::pitch.compute();
-  pid::inner::roll.compute();
+    // Calculate the attitude.
+    // ======================= (sync block)
+    mad::imu::Attitude attitude;
 
-  /* Cycles:
-  0 - Compute outer PID
-  1 - Battery voltage, Altitude
-  2 - Communication[1/2], Indication[1/2]
-  3 - Communication[1/2], Indication[1/2]
-  */
-  static int8_t innerCycles = 0;
-  ++innerCycles;
+    static uint32_t mahonyLUS = usThisCycle;
+#   if DEBUG_SYNC_PERIOD
+    uart::print("SP: "); uart::println(us() - mahonyLUS);
+#   endif
+    syncCycle(&mahonyLUS);
+    /* The next line of code is executed at an exact period, if
+       config::cyclePeriod in MAD-FC-2a_config.hpp is set correctly. */
+    mahony.update(&attitude.yaw, &attitude.pitch, &attitude.roll,
+                  accelerationRaw.x, accelerationRaw.y, accelerationRaw.z,
+                  angularVelocityRadS.x, angularVelocityRadS.y, angularVelocityRadS.z);
+    attitude.yaw = mad::utils::radiansToDegrees(attitude.yaw);
+    attitude.pitch = mad::utils::radiansToDegrees(attitude.pitch);
+    attitude.roll = mad::utils::radiansToDegrees(attitude.roll);
 
-  if (innerCycles >= 4 || innerCycles < 0) {
-    innerCycles = 0;
-    pid::outer::pitch.compute();
-    pid::outer::roll.compute();
-  }
 
-#if DEBUG_PID_PITCH
-  if (!innerCycles % 3) {
-    if (command.flightMode == FlightMode::stabilize) {
-      uart::print(command.pitch);
-      uart::print(","); uart::print(attitude.pitch);
+    // Calculate the angular velocities.
+    // ---------------------------------
+    mad::imu::AngularVelocity angularVelocityDegS;
+    static mad::imu::Attitude attitudeLast;
+
+    static uint32_t dAvLUS = usThisCycle; // delta angular velocity
+    uint32_t usV = us(); // microseconds velocity
+    float dtV = (usV - dAvLUS) / 1000000.0f; // dt velocity
+    // stopwatch the time to the actual instruction and add it to dAvLUS
+    angularVelocityDegS.z = (attitude.yaw - attitudeLast.yaw) / (dtV + 0.000016f);
+    /* The difference in angle with respect to time is angular velocity. The small
+       number added to dtV is the time passed since dtV was calculated. */
+    attitudeLast.yaw = attitude.yaw;
+    if (config::imu::deriveFromFused) {
+      /* The angular velocity of x and y can be taken directly from the gyroscope's
+         output or it can be calculated from the fused angle. The later should be
+         less noisy. */
+      angularVelocityDegS.x = (attitude.pitch - attitudeLast.pitch) / (dtV + 0.000032f);
+      // stopwatch the time to this instruction and add it to dtV in seconds
+      angularVelocityDegS.y = (attitude.roll - attitudeLast.roll) / (dtV + 0.000036f);
+      // stopwatch the time to this instruction and add it to dtV in seconds
+      attitudeLast.pitch = attitude.pitch;
+      attitudeLast.roll = attitude.roll;
     } else {
-      uart::print(","); uart::print(pid::inner::setpoint::pitch);
-      uart::print(","); uart::print(angularVelocity.y);
+      angularVelocityDegS.x = imu.gyroRawToDegS(angularVelocityRaw.x);
+      angularVelocityDegS.y = imu.gyroRawToDegS(angularVelocityRaw.y);
+      /* Yaw's angular velocity is always derived from the fused yaw angle
+         since it is definetly more accurate. */
     }
-    uart::print(","); uart::print(pid::inner::output::pitch); uart::print("\n");
-  }
-#endif
-#if DEBUG_PID_ROLL
-  if (!innerCycles % 3) {
-    if (command.flightMode == FlightMode::stabilize) {
-      uart::print(command.roll);
-      uart::print(","); uart::print(attitude.roll);
+    dAvLUS = usV;
+    // ---------------------------------
+    // =======================
+
+
+    // Calculate the controllers.
+    // ==========================
+    static mad::Control control; // This object holds mainly the user's input.
+    static float throttle = control.throttle;
+    static float yawDifferential = 0.0f;
+    static float pitchDifferential = 0.0f;
+    static float rollDifferential = 0.0f;
+    /* The 'differential' variables will be calculated from the controllers and
+       then will be added to the motors to create the desired "pull" difference. */
+
+    if (control.holdAltitude) {
+      // set control.altitude from throttle, when throttle centers set current altitude
+      // control.verticalVelocity = controller::altitude.calculate(control.altitude,
+      // altitude, control.verticalVelocity);
+      // throttle = controller::verticalVelocity.calculate(control.verticalVelocity,
+      // verticalVelocity, throttle);
+    } else {
+      throttle = control.throttle;
     }
-    uart::print(","); uart::print(pid::inner::setpoint::roll);
-    uart::print(","); uart::print(angularVelocity.x);
-    uart::print(","); uart::print(pid::inner::output::roll); uart::print("\n");
-  }
-#endif
-#if DEBUG_PID_YAW
-  if (!innerCycles % 3) {
-    uart::print(command.yaw);
-    uart::print(", "); uart::print(avYaw);
-    uart::print(", "); uart::print(pid::inner::output::yaw);
-    uart::print("\n");
-  }
-#endif
-  // ~Regulation -----
 
+    if (config::controller::type == mad::ControllerType::PID) {
+      // PID variant.
+      // ------------
 
-  // Attitude -----
-  // Fetch
-  imu::mpu6050.getMotion(&angularVelocity, &acceleration);
-
-
-
-#if DEBUG_ANGULAR_VELOCITY
-  if (innerCycles == 0) {
-    uart::print(angularVelocity.x); uart::print(", ");
-    uart::print(angularVelocity.y); uart::print(", ");
-    uart::print(angularVelocity.z); uart::print("\n");
-  }
-#endif
-#if DEBUG_ACCELERATION
-  if (innerCycles == 0) {
-    uart::print(acceleration.x); uart::print(", ");
-    uart::print(acceleration.y); uart::print(", ");
-    uart::print(acceleration.z); uart::print("\n");
-  }
-#endif
-
-
-// #define COMPLEMENTARY_FUSION false
-// #if COMPLEMENTARY_FUSION
-//   // Accelerometer angle
-//   float x_sqr = square((float)acceleration.x);
-//   float y_sqr = square((float)acceleration.y);
-//   float z_sqr = square((float)acceleration.z);
-
-//   float roll_a = atan2( (float) - acceleration.x,
-//                         sqrt(y_sqr + z_sqr))
-//                  * toDegrees;
-//   float pitch_a = atan2( (float) acceleration.y,
-//                          sign(acceleration.z) * sqrt(z_sqr + (config::imu::epsilon * x_sqr)))
-//                   * toDegrees;
-
-//   // Fusion
-//   static uint32_t fusionLUS = microsThisCycle;
-//   microsNow = micros();
-//   float dt = (float)(microsNow - fusionLUS) / 1000000.0;
-
-//   attitude.pitch = (attitude.pitch + angularVelocity.x * dt) * config::imu::complementary::alpha()
-//                    + pitch_a * config::imu::complementary::oneMinusAlpha;
-//   attitude.roll = (attitude.roll + angularVelocity.y * dt) * config::imu::complementary::alpha()
-//                   + roll_a * config::imu::complementary::oneMinusAlpha;
-//   fusionLUS = microsNow;
-//   // { LPF attitude }
-// #endif
-// #if DEBUG_ACCELEROMETER_ANGLE
-//   if (innerCycles == 0) {
-//     DEBUG(pitch_a); DEBUG(", "); DEBUG(angularVelocity.x);
-//     DEBUG(", ");  DEBUG(roll_a); DEBUG(", "); DEBUGLN(angularVelocity.y);
-//   }
-// #endif
-
-#define MAHONY_FUSION true
-#if MAHONY_FUSION
-  static uint32_t mahonyLUS = micros();
-  WAIT_FOR_CYCLE(mahonyLUS);
-  // Serial.println(micros() - mahonyLUS);
-  mahonyLUS = micros();
-  float mahonyYaw, mahonyPitch, mahonyRoll;
-  mahony.update(mahonyYaw, mahonyPitch, mahonyRoll,
-                acceleration.x, acceleration.y, acceleration.z,
-                angularVelocity.x * DEG_TO_RAD, angularVelocity.y * DEG_TO_RAD, angularVelocity.z * DEG_TO_RAD);
-  // mahony.update(mahonyYaw, mahonyPitch, mahonyRoll,
-  //               acceleration.x, acceleration.y, acceleration.z,
-  //               angularVelocity.x * DEG_TO_RAD, angularVelocity.y * DEG_TO_RAD, angularVelocity.z * DEG_TO_RAD,
-  //               my, mx, mz);
-  attitude.roll = mahonyPitch * RAD_TO_DEG;
-  attitude.pitch = mahonyRoll * RAD_TO_DEG;
-  float mYaw = mahonyYaw * RAD_TO_DEG;
-
-  // float Xh = mx * cos(attitude.pitch) + my * sin(attitude.roll) * sin(attitude.pitch) - mz * cos(attitude.roll) * sin(attitude.pitch);
-  // float Yh = my * cos(attitude.roll) + mz * sin(attitude.roll);
-  // float yawmag = atan2(Yh, Xh) + M_PI;
-  // Serial.println(yawmag);
-
-  static uint32_t dVelocityLUS = microsThisCycle;
-  static float attitudeYawLast = mYaw;
-  uint32_t us = micros();
-  float vDt = (us - dVelocityLUS + 4) / 1000000.0f;
-  avYaw = (mYaw - attitudeYawLast) / vDt;
-  attitudeYawLast = mYaw;
-  dVelocityLUS = us;
-#endif
-
-
-#if DEBUG_ATTITUDE
-  if (innerCycles == 0) {
-    uart::print(attitude.pitch); uart::print(", "); uart::print(attitude.roll); uart::print("\n");
-  }
-#endif
-  // ~Attitude -----
-
-
-  // Motor mix
-  uint8_t tl_p = 0;
-  uint8_t tr_p = 0;
-  uint8_t bl_p = 0;
-  uint8_t br_p = 0;
-  if (throttle > config::regulation::minimumRegulationThrottle) {
-    if (throttle > config::regulation::maximumBaseThrottle) throttle = config::regulation::maximumBaseThrottle;
-    tl_p = clamp(throttle
-                 + pid::inner::output::pitch + pid::inner::output::roll - pid::inner::output::yaw,
-                 0, 127);
-    tr_p = clamp(throttle
-                 + pid::inner::output::pitch - pid::inner::output::roll + pid::inner::output::yaw,
-                 0, 127);
-    bl_p = clamp(throttle
-                 - pid::inner::output::pitch + pid::inner::output::roll + pid::inner::output::yaw,
-                 0, 127);
-    br_p = clamp(throttle
-                 - pid::inner::output::pitch - pid::inner::output::roll - pid::inner::output::yaw,
-                 0, 127);
-  } else {
-    tl_p = throttle;
-    tr_p = throttle;
-    bl_p = throttle;
-    br_p = throttle;
-    pid::outer::pitch.unwind();
-    pid::outer::roll.unwind();
-    pid::inner::yaw.unwind();
-  }
-  OCR0B = 127 + tl_p;
-  OCR1B = 127 + tr_p;
-  OCR0A = 127 + bl_p;
-  OCR1A = 127 + br_p;
-
-#if DEBUG_MOTORS
-  if (innerCycles == 0) {
-    static uint32_t dm_lm = millis();
-    if (millis() > dm_lm + 50) {
-      dm_lm = millis();
-      uart::print(OCR0B); uart::print("\t"); uart::print(OCR1B); uart::print("\n");
-      uart::print(OCR0A); uart::print("\t"); uart::print(OCR1A); uart::print("\n");
-      uint8_t i = 0;
-      while (i++ < 12) uart::print("\n");
-    }
-  }
-#endif
-// ~Motor mix -----
-
-  // if (compass.read(&mx, &my, &mz)) mz = 0.0f - mz;
-  // compass.read(&mx, &my, &mz);
-  // if (compass.overflow()) {
-  //   mx = 0.0f; my = 0.0f; mz = 0.0f;
-  // }
-  // uart::print(mx); uart::print(",");
-  // uart::print(my); uart::print(",");
-  // uart::println(-mz);
-  // Wire.setClock(800000);
-
-// Communication
-  static uint32_t lastCommandLUS = microsThisCycle;
-  static uint32_t batteryVoltageLUS = microsThisCycle;
-  if (innerCycles == 1 && comm::rf24.available()) {
-    while (comm::rf24.available()) {
-      uint8_t rawMessage[32];
-      comm::rf24.read(&rawMessage, 32);
-      switch ((PacketType)rawMessage[0]) {
-      case PacketType::Command:
-        memcpy(&command, &rawMessage, sizeof(command));
-        handleCommand();
-        lastCommandLUS = microsThisCycle;
-        break;
-      case PacketType::Setting:
-        Setting setting;
-        memcpy(&setting, &rawMessage, sizeof(setting));
-        handleSetting(setting);
-        break;
-      // case PacketType::Telemetry_imu:
-      //   comm::rf24.reset();
-      //   DEBUGLN("?t_imu");
-      //   break;
-      // case PacketType::Telemetry_motors:
-      //   comm::rf24.reset();
-      //   DEBUGLN("?t_motors");
-      //   break;
-      default:
-        comm::rf24.reset();
-        DEBUG("unrec "); DEBUGLN(rawMessage[0]);
-        break;
+      // ------------ ~PID
+    } else if (config::controller::type == mad::ControllerType::PI_P) {
+      // PI-P variant.
+      // -------------
+      // Outer (every third cycle).
+      /* The outer controller loop compares the desired angle to the actual
+         one and calculates an appropriate output. In this case the output
+         is desided to be velocity... */
+      if (thisCycle == config::controller::outer::cycle) {
+        static uint32_t outerLUS = usThisCycle;
+        while (us() - outerLUS < config::cyclePeriod * (config::cycles + 1));
+        outerLUS = us();
+        control.rollVelocity = controller::outer::pitch.calculate(control.pitchAngle,
+                               attitude.pitch, control.rollVelocity);
+        control.pitchVelocity = controller::outer::roll.calculate(control.rollAngle,
+                                attitude.roll, control.pitchVelocity);
       }
-    }
-  } else if (microsThisCycle - lastCommandLUS > config::communication::commandTimeout) {
-    throttle = 0;
-    pid::outer::pitch.on();
-    pid::outer::roll.on();
-    command.pitch = 0;
-    command.roll = 0;
-    command.yaw = 0;
-    altitudeHold = false;
-    status::communication = Status::error;
-#if DEBUG_COMMAND
-    if (command.flightMode == FlightMode::stabilize) DEBUG("STAB - ");
-    else if (command.flightMode == FlightMode::acro) DEBUG("ACRO - ");
-    else DEBUG("DIRECT - ");
-    DEBUG("TH: "); DEBUG(command.throttle); DEBUG(", P: "); DEBUG(command.pitch);
-    DEBUG(", R: "); DEBUG(command.roll); DEBUG(", Y: "); DEBUG(command.yaw);
-    DEBUGLN();
-#endif
-  } else if (innerCycles == 3 && (microsThisCycle - batteryVoltageLUS > config::battery::updateRate)) {
-    batteryVoltageLUS = microsThisCycle;
-    batteryVoltage = readBatteryVoltage();
-    static float batteryVoltage_last = 0.0;
-    batteryVoltage = lowPassFilter(batteryVoltage, batteryVoltage_last, config::battery::alpha);
-    batteryVoltage_last = batteryVoltage;
-    if (batteryVoltage > config::battery::lowVoltage) {
-      status::battery = Status::normal;
-    } else if (batteryVoltage > config::battery::criticalVoltage) {
-      status::battery = Status::warning;
+      // Inner (every cycle).
+      /* The inner controller loop uses the output from the outer loop as the
+         desired angular velocity and compares it with the actual angular
+         velocity. The output is desided to be difference in motor "pull"...  */
+      static uint32_t innerLUS = usThisCycle;
+      syncCycle(&innerLUS);
+      yawDifferential = controller::inner::yaw.calculate(control.yawVelocity,
+                        angularVelocityDegS.z, yawDifferential);
+      pitchDifferential = controller::inner::pitch.calculate(control.rollVelocity,
+                          angularVelocityDegS.z, pitchDifferential);
+      rollDifferential = controller::inner::roll.calculate(control.pitchVelocity,
+                         angularVelocityDegS.z, rollDifferential);
+      // ------------- ~PI-P
     } else {
-      status::battery = Status::error;
+      config::controller::type == mad::ControllerType::PID; // default to PID
     }
-  }
-// ~Communication -----
+    // ==========================
 
 
-  static float p = takeOffPressure;
-  static float t = 0.0;
-  if (innerCycles == 2) { //700us
-    float newP = takeOffPressure;
-    bmp.read(newP, t);
-    if (newP < p - 5000.0 || newP > p + 5000.0) newP = p;
-    p = newP * 0.07 + p * 0.93;
-    // Serial.print("P: "); Serial.print(p); Serial.print("hPa\t");
-  } else if (innerCycles == 3) { //400us
-    float absoluteAltitude = calculateAltitude(p, seaLevelPressure, t);
-    relativeAltitude = absoluteAltitude - takeOffAltitude;
-
-    static float relativeAltitudeLastFilter = relativeAltitude;
-    relativeAltitude = relativeAltitude * 0.08 + relativeAltitudeLastFilter * 0.92;
-    relativeAltitudeLastFilter = relativeAltitude;
-    // Serial.print("A: "); Serial.print(absoluteAltitude); Serial.print("m\t");
-    // Serial.print("RA: "); Serial.print(relativeAltitude); Serial.print("m\t");
-
-    static bool recorded = true;
-    if (relativeAltitude > recordRelativeAltitude || recorded == false) {
-      recordRelativeAltitude = relativeAltitude;
-      recorded = eeprom::write(recordRelativeAltitude_address, recordRelativeAltitude);
-    } else if (absoluteAltitude < takeOffAltitude - 1.5f) {
-      takeOffAltitude = absoluteAltitude;
+    // Mix the motors.
+    // ===============
+    /* The output from the inner controller loop is a number representing
+       the difference in motor "pull" required to achieve the user's input.
+       This number can be positive, negative or zero and it is added or
+       substracted to the appropriate motors (e.g. the pitch output is
+       added/substracted from the front motors and substracted/added to the
+       back ones). The sign depends on the IMU's output and the controller's
+       direction (the input from the remote is corrected based on the IMU's
+       output). To control yaw there needs to be a difference in gyroscopic
+       effect (e.g. to rotate the drone CCW the motors rotating CW have to
+       be rotating faster than the motors rotating CCW). In this case the
+       top-left motor is rotating CCW, top-right - CW, bottom-right - CCW and
+       bottom-left - CW. Since the mechanics of controlling yaw is different
+       than the one controlling pitch and roll (difference in motor "pull"
+       generates less angular velocity through gyroscopic effect compared to
+       aerodynamic one), there needs to be a different controller with it's
+       own configuration for controlling yaw. */
+    // !!! move some to beginning
+    static uint32_t motorMixLUS = 0;
+    syncCycle(&motorMixLUS);
+    uint8_t tl = 0, tr = 0, bl = 0, br = 0;
+    if (throttle > config::minimumRegulationThrottle) {
+      /* The controllers' outputs are ignored at very low throttle,
+         otherwise the proppelers will rotate when the drone is not
+         level or moving (e.g. being carried). */
+      if (throttle > config::maximumBaseThrottle) {
+        throttle = config::maximumBaseThrottle;
+        /* The maximum throttle settable by the user is lower than actual
+           maximum one. This is to avoid losing half of the controllers'
+           outputs when at full throttle. */
+      }
+      tl = (uint8_t)mad::util::clamp(round(throttle
+                                           + pitchDifferential
+                                           + rollDifferential
+                                           - yawDifferential), 0, 127);
+      tr = (uint8_t)mad::util::clamp(round(throttle
+                                           + pitchDifferential
+                                           - rollDifferential
+                                           + yawDifferential), 0, 127);
+      bl = (uint8_t)mad::util::clamp(round(throttle
+                                           - pitchDifferential
+                                           + rollDifferential
+                                           + yawDifferential), 0, 127);
+      br = (uint8_t)mad::util::clamp(round(throttle
+                                           - pitchDifferential
+                                           - rollDifferential
+                                           - yawDifferential), 0, 127);
+      /* The result from mixing the controllers' outputs and the base throttle
+         is rounded and then clamped to the settable range of the motors. */
+    } else {
+      uint8_t t = (uint8_t)mad::util::clamp(round(throttle), 0, 127);
+      tl = t; tr = t;
+      bl = t; br = t;
+      /* If the throttle is below the minimum regulation margin it is directly
+         applied to the motors. */
+      controller::inner::yaw.unwindIntegralSum(angularVelocityDegS.z, yawDifferential);
+      controller::outer::pitch.unwindIntegralSum(attitude.pitch, control.rollVelocity);
+      controller::outer::roll.unwindIntegralSum(attitude.roll, control.pitchVelocity);
+      /* The integral sum is reset while at very low throttle (usually the drone
+         will be on the ground) to avoid accumulating large integral error for
+         no reason. */
     }
-
-    // // kinda good
-    // static float relativeAltitudeLast = relativeAltitude;
-    // static uint32_t verticalVelocityLUS = microsThisCycle;
-    // float vvDt = (float)(micros() - verticalVelocityLUS) / 1000000.0f;
-    // verticalVelocityLUS = micros();
-    // verticalVelocity = ((float)(relativeAltitude - relativeAltitudeLast) / vvDt) * 3.6;
-    // relativeAltitudeLast = relativeAltitude;
-    // static float verticalVelocityLast = verticalVelocity;
-    // verticalVelocity = verticalVelocity * 0.05 + verticalVelocityLast * 0.95;
-    // verticalVelocityLast = verticalVelocity;
-
-    // static uint32_t vseLUS = microsThisCycle;
-    // if (batteryVoltage > 5.0 && micros() - vseLUS > 1000000) {
-    //   vseLUS = micros();
-    //   static uint16_t ea = 300;
-    //   if (ea < 1020 && eeprom_is_ready()) {
-    //     int16_t vv = round(verticalVelocity * 100.0f);
-    //     eeprom::write(ea, vv);
-    //     int16_t ra = round(relativeAltitude * 100.0f);
-    //     eeprom::write(ea + 2, ra);
-    //     ea += 4;
-    //   }
-    // }
-    // Serial.print("RA: "); Serial.println(relativeAltitude);
-    // Serial.print("S: "); Serial.print(verticalSpeed); Serial.println("km/h");
-
-    // static uint32_t lus = 0;
-    // if (millis() - lus > 100) {
-    //   lus = millis();
-    //   Serial.print("P: "); Serial.print(p);
-    //   Serial.print("mb\t A: "); Serial.print(absoluteAltitude);
-    //   Serial.print("m\t TOA: "); Serial.print(takeOffAltitude);
-    //   Serial.print("m\t RA: "); Serial.print(relativeAltitude);
-    //   Serial.print("m\t VS: "); Serial.print(verticalSpeed);
-    //   Serial.println("km/h");
-    // }
-
-    // if (verticalVelocity > recordClimbSpeed) {
-    //   recordClimbSpeed = verticalVelocity;
-    //   eeprom::write(recordClimbSpeed_address, recordClimbSpeed);
-    //   // Serial.print("Speed: "); Serial.println(verticalVelocity);
-    // } else if (verticalVelocity < recordFallSpeed) {
-    //   recordFallSpeed = verticalVelocity;
-    //   eeprom::write(recordFallSpeed_address, recordFallSpeed);
-    //   // Serial.print("Speed: "); Serial.println(verticalSpeed);
-    // }
-
-    // Serial.print("Alt t: "); Serial.println(micros() - m1);
-    // Serial.print(F("T: "); Serial.print(t);
-    // Serial.print(F(", P: "); Serial.print(p);
-    // Serial.print(F(", RA: "); Serial.println(relativeAltitude);
+    OCR0B = 127 + tl; OCR1B = 127 + tr;
+    OCR0A = 127 + bl; OCR1A = 127 + br;
+    /* The motors' drivers are controlled with PPM signals. Half PWM is off,
+       (full PWM - 1) in full on. */
+    // ===============
 
 
-    static uint32_t batLUS = microsThisCycle;
-    if (microsThisCycle - batLUS > 500000 && batteryVoltage > 5.0f
-        && microsThisCycle > 1200000000) {
-      batLUS = microsThisCycle;
-      // uint16_t batt_mv = round((float)batteryVoltage * 1000.0f);
-      // uint16_t relativeCurrent = (OCR0B + OCR1B + OCR0A + OCR1A);
-      static int16_t ea = 300;
-      if (ea < 1010) {
-        eeprom_busy_wait();
-        // eeprom_write_byte((uint8_t*)address, (uint8_t)value);
-        // eeprom::write(ea, w);
-        Str str;
-        str.b_mv = (float)batteryVoltage * 1000.0f;
-        str.rc = (OCR0B + OCR1B + OCR0A + OCR1A);
-        eeprom_write_block((const void*)&str, (void*)ea, sizeof(str));
-        // eeprom::write(ea, batt_mv);
-        // eeprom::write(ea + 2, relativeCurrent);
-        ea += 4;
+    // Low priority (indication, additional sensors...).
+    // =================================================
+    float batteryVoltage = 0.0f;
+    if (thisCycle == config::lowPriorityCycle) {
+      static int8_t subCycle = 0;
+
+      if (subCycle == 0) {
+        static uint32_t indicationLUS = 0;
+        if (usThisCycle - indicationLUS > config::indication::period) {
+          updateIndication();
+        }
+      } else if (subCycle == 1) {
+        // uint32_t m = us(); // stopwatch the maximum allowed time
+        batteryVoltage = readBattery();
+        // DEBUG(us() - m);
       } else {
-        // ea = 300;
+        // Do scheduled work (with timeouts).
+        // zero out angular velocity if on the ground
+        // update statistics in eeprom
+        // - battery, horizontal speed, motor power
+        // - record altitude, record horizontal speed
+        // - time flying
+        // - motor energy
+
+        subCycle = -1;
       }
-    }
+      ++subCycle;
+    } // if correct cycle
+    // =================================================
 
-    // void  eeprom_read_block (void *__dst, const void *__src, size_t __n)
-    // void  eeprom_write_block (const void *__src, void *__dst, size_t __n)
-  }
 
-  // static float t = 0.0f;
-  // static float p = 0.0f;
-  // if (innerCycles == 2) {
-  //   bmp.readPressureAndTemperature(&p, &t);
-  // } else if (innerCycles == 3) {
-  //   float absoluteAltitude = bmp.calculateAltitude(p, 1013, t);
-  //   relativeAltitude = absoluteAltitude - takeOffAltitude;
+    // Check for new message (every 3rd cycle).
+    // ========================================
+    if (thisCycle == config::communication::cycle) {
+      static uint32_t commandLUS = usThisCycle;
+      static bool justReceived = false;
+      static bool readyForTelemetry = false;
 
-  //   static float relativeAltitudeLastFilter = relativeAltitude;
-  //   relativeAltitude = relativeAltitude * 0.01 + relativeAltitudeLastFilter * 0.99;
-  //   relativeAltitudeLastFilter = relativeAltitude;
-  //   // Serial.println(relativeAltitude);
-
-  //   if (relativeAltitude > recordRelativeAltitude) {
-  //     recordRelativeAltitude = relativeAltitude;
-  //     EEPROM.put(504, recordRelativeAltitude);
-  //   } else if (absoluteAltitude < takeOffAltitude) {
-  //     takeOffAltitude = absoluteAltitude;
-  //   }
-
-  //   static uint32_t dRelativeAltitudeLUS = 0;
-  //   WAIT_FOR_CYCLE(dRelativeAltitudeLUS);
-  //   dRelativeAltitudeLUS = micros();
-  //   static float relativeAltitudeLast = relativeAltitude;
-  //   float verticalSpeed = (relativeAltitude - relativeAltitudeLast) / 0.0031;
-  //   relativeAltitudeLast = relativeAltitude;
-  //   // Serial.print("S: "); Serial.println(verticalSpeed);
-
-  //   if (verticalSpeed > recordClimbSpeed) {
-  //     recordClimbSpeed = verticalSpeed;
-  //     EEPROM.put(600, recordClimbSpeed);
-  //     Serial.print("Speed: "); Serial.println(verticalSpeed);
-  //   } else if (verticalSpeed < recordFallSpeed) {
-  //     recordFallSpeed = verticalSpeed;
-  //     EEPROM.put(700, recordFallSpeed);
-  //     Serial.print("Speed: "); Serial.println(verticalSpeed);
-  //   }
-
-  //   // Serial.print("Alt t: "); Serial.println(micros() - m1);
-  //   // Serial.print(F("T: "); Serial.print(t);
-  //   // Serial.print(F(", P: "); Serial.print(p);
-  //   // Serial.print(F(", RA: "); Serial.println(relativeAltitude);
-  // }
-
-// Indication
-  if ((innerCycles == 1 || innerCycles == 3) && status::communication == Status::normal) {
-    if (indication::arms() != expMap[clamp(config::indication::armsLevel(), 0, 13)]) {
-      uint8_t armsPwm = indication::arms();
-      if (armsPwm > expMap[clamp(config::indication::armsLevel(), 0, 13)]) {
-        indication::arms(--armsPwm);
-      } else if (armsPwm < expMap[clamp(config::indication::armsLevel(), 0, 13)]) {
-        indication::arms(++armsPwm);
+      if (justReceived) {
+        adjustControllers();
+        justReceived = false;
+        readyForTelemetry = true;
+      } else if (usThisCycle - commandLUS > config::communication::timeout) {
+        control.flyMode = mad::FlyMode::noConnection;
+      } else if (readyForTelemetry) {
+        updateTelemetryMessage();
+        readyForTelemetry = false;
       }
-    }
+
+      while (com::rf24.available()) {
+        const uint8_t size = com::rf24.getDynamicPayloadSize();
+        if (size != 0) {
+          uint8_t messageRaw[size];
+          com::rf24.read(&messageRaw, size);
+          if (messageRaw[0] == mad::communication::MessageType::command) {
+            if (communication::commandHandler(&messageRaw, size)) {
+              commandLUS = usThisCycle;
+              justReceived = true;
+            }
+          } else if (messageRaw[0] == mad::communication::MessageType::setting) {
+            communication::settingHandler(&messageRaw);
+          } else {
+            //error
+            com::rf24.read(0, 0);
+          }
+        } // if size is valid
+      } // while there is a message
+    } // if correct cycle
+    // ========================================
+
+  } // main cycle
+  return 0;
+}
+
+
+void updateIndication() {
+  static uint8_t levelSetpoint = config::indication::armsLevel();
+  const uint8_t levelCurrent = board::indication::armsLevel();
+  uint8_t levelNew = 0;
+  if (levelCurrent < levelSetpoint) {
+    levelNew = levelCurrent + 1;
+  } else if (levelCurrent > levelSetpoint) {
+    levelNew = levelCurrent - 1;
   }
-  static uint32_t indicationLUS = microsThisCycle;
-  if ((innerCycles == 1) && microsThisCycle - indicationLUS > config::indication::period) {
-    indicationLUS = microsThisCycle;
-    if (status::battery == Status::normal && status::communication == Status::normal) {
-      indication::toggleSignal();
-      indication::warning(0);
-    } else if (status::communication != Status::normal) {
-      indication::toggleSignal();
-      indication::warning(!indication::signal());
-      indication::toggleArms();
-    } else if (status::battery == Status::warning) {
-      indication::toggleSignal();
-      indication::warning(!indication::signal());
-    } else if (status::battery == Status::error) {
-      indication::signal(0);
-      indication::toggleWarning();
+  /* The above code achieves gradual change in brightness for the arms'
+     LEDs. The level setpoint is set later based on the state of the drone. */
+  board::indication::arms(pgm_read_byte(&exp[mad::utils::clamp(levelNew, 0, 36)]));
+  /* The actual brighness is an exponential function stored as array in
+     PROGMEM. For more information: https://github.com/VaSe7u/ExponentMap */
+
+  static uint32_t indicationLUS = usThisCycle;
+  if (usThisCycle - indicationLUS > config::indication::period) {
+    indicationLUS = usThisCycle;
+    /* Indication pattern (from highest to lowest priority):
+         No connection - arms blink and LEDs blink;
+         Landing - arms blink;
+         Critical battery - arms blink (full on - almost full on) and red LED blink;
+         Low battery - green and red LED blink;
+         Altitude hold - arms fade (full on - almost full on);
+         Not in angle fly mode - arms fade (full on - mid);
+    */
+
+    // Arms LEDs
+    static bool armsStep = 0;
+    armsStep = !armsStep;
+    if (control.flyMode == mad::FlyMode::noConnection || control.flyMode == mad::FlyMode::land) {
+      board::indication::armsToggle();
+    } else if (batteryVoltage < config::battery::criticalMargin) {
+      (armsStep) ? levelSetpoint = 36 : levelSetpoint = 27;
+      board::indication::arms(pgm_read_byte(&exp[mad::utils::clamp(levelSetpoint, 0, 36)]));
+    } else if (control.holdAltitude) {
+      (armsStep) ? levelSetpoint = 36 : levelSetpoint = 27;
+    } else if (control.flyMode != mad::FlyMode::angle) {
+      (armsStep) ? levelSetpoint = 36 : levelSetpoint = 18;
     } else {
-      status::communication = Status::normal;
-      status::battery = Status::normal;
+      levelSetpoint = config::indication::armsLevel();
+    }
+
+    // Board LEDs
+    if (control.flyMode == mad::FlyMode::noConnection) {
+      board::indication::signal(!board::indication::armsState());
+      board::indication::warning(!board::indication::armsState());
+    } else if (batteryVoltage < config::battery::criticalMargin) {
+      board::indication::signal(false);
+      board::indication::warningToggle();
+    } else if (batteryVoltage < config::battery::lowMargin) {
+      board::indication::signalToggle();
+      board::indication::warning(board::indication::signalState());
+    } else {
+      board::indication::signalToggle();
+      board::indication::warning(false);
     }
   }
-// ~Indication -----
+}
 
+float readBattery() {
+  float batteryVoltage = static_cast<float>(adc::read(pin::input::batteryVoltage)
+                         * board::battery::readingMultiplier);
+  /* The battery's ADC reading is converted to voltage with a previously
+     calculated multiplier defined in MAD-FC-2a_board.hpp. */
+  static float batteryVoltageLast = batteryVoltage;
+  mad::util::lowPassFilter(&batteryVoltage, &batteryVoltageLast,
+                           config::battery::lpfAlpha);
+  return batteryVoltage;
+}
 
-} //void loop()
+void adjustControllers() {
+  if (config::controller::type == ControllerType::PI_P) {
+    // PI-P
+    if (control.flyMode == mad::FlyMode::angle) {
+      // Control by angle.
+      controller::outer::pitch.on();
+      controller::outer::roll.on();
+      control.pitchAngle = control.pitch;
+      control.rollAngle = control.roll;
+    } else if (control.flyMode == mad::FlyMode::acro) {
+      // Control by angular velocity.
+      controller::outer::pitch.off();
+      controller::outer::roll.off();
+      control.pitchVelocity = control.pitch;
+      control.rollVelocity = control.roll;
+    } else if (control.flyMode == mad::FlyMode::horizon) {
+      // If tilt is below certain margin 'angle', else 'acro'.
+      if (abs(control.pitch) < config::horizonMargin) { //angle pitch
+        controller::outer::pitch.on();
+        control.pitchAngle = control.pitch;
+      } else { //acro pitch
+        controller::outer::pitch.off();
+        control.pitchVelocity = control.pitch;
+      }
+      if (abs(control.roll) < config::horizonMargin) { //angle roll
+        controller::outer::roll.on();
+        control.rollAngle = control.roll;
+      } else { //acro roll
+        controller::outer::roll.off();
+        control.rollVelocity = control.roll;
+      }
+    } else if (control.flyMode == mad::FlyMode::land) {
+      // stab and turn on altitude controller
+      // continuaously decrease control.altitude
+    } else if (control.flyMode == mad::FlyMode::direct) {
+      // turn off everything
+    } else {
+      control.flyMode = mad::FlyMode::angle;
+      // Control by angle.
+      controller::outer::pitch.on();
+      controller::outer::roll.on();
+      control.pitchAngle = control.pitch;
+      control.rollAngle = control.roll;
+    }
+  } else if (config::controller::type == ControllerType::PID) {
+    // PID
 
-
-void handleCommand() {
-  switch (config::communication::telemetry::type()) {
-  case 0:
-    comm::rf24.setResponse(nullptr, sizeof(nullptr));
-    break;
-  case 1:
-    static Telemetry telemetry;
-    telemetry._type = PacketType::Telemetry;
-    telemetry.batteryVoltage = batteryVoltage;
-    telemetry.altitude = relativeAltitude;
-    comm::rf24.setResponse(&telemetry, sizeof(telemetry));
-    break;
-  case 2:
-    static Telemetry_regulation telemetry_regulation;
-    telemetry_regulation._type = PacketType::Telemetry_regulation;
-    telemetry_regulation.batteryVoltage = batteryVoltage;
-    telemetry_regulation.commandRoll = command.roll;
-    telemetry_regulation.avRoll = angularVelocity.y;
-    telemetry_regulation.attitudeRoll = attitude.roll;
-    comm::rf24.setResponse(&telemetry_regulation, sizeof(telemetry_regulation));
-    break;
-  case 3:
-    static Telemetry_imu telemetry_imu;
-    telemetry_imu._type = PacketType::Telemetry_imu;
-    telemetry_imu.angularVelocity.x = angularVelocity.x;
-    telemetry_imu.angularVelocity.y = angularVelocity.y;
-    telemetry_imu.angularVelocity.z = angularVelocity.z;
-    telemetry_imu.acceleration.x = acceleration.x;
-    telemetry_imu.acceleration.y = acceleration.y;
-    telemetry_imu.acceleration.z = acceleration.z;
-    telemetry_imu.attitude.pitch = attitude.pitch;
-    telemetry_imu.attitude.roll = attitude.roll;
-    telemetry_imu.batteryVoltage = batteryVoltage;
-    comm::rf24.setResponse(&telemetry_imu, sizeof(telemetry_imu));
-    break;
-  case 4:
-    static Telemetry_motors telemetry_motors;
-    telemetry_motors._type = PacketType::Telemetry_motors;
-    telemetry_motors.tl = OCR0B;
-    telemetry_motors.tr = OCR1B;
-    telemetry_motors.bl = OCR0A;
-    telemetry_motors.br = OCR1A;
-    telemetry_motors.batteryVoltage = batteryVoltage;
-    comm::rf24.setResponse(&telemetry_motors, sizeof(telemetry_motors));
-    break;
-  default: break;
-  }
-
-  static uint8_t senderId = command.senderId;
-  if (command.senderId != senderId
-      || command.throttle < 0 || command.throttle > 127
-      || command.pitch < -200 || command.pitch > 200
-      || command.roll < -200 || command.roll > 200) {
-    // DEBUG("Invalid message: "); DEBUG(command.senderId);
-    // DEBUG(", "); DEBUG(command.messageId);
-    // DEBUG(", "); DEBUG(command.throttle);
-    // DEBUG(", "); DEBUG(command.pitch);
-    // DEBUG(", "); DEBUG(command.roll);
-    // DEBUG(", "); DEBUG(command.yaw);
-    // DEBUG(", "); DEBUG((uint8_t)command.flightMode); DEBUGLN();
-    OCR0B = 0;
-    OCR1B = 0;
-    OCR0A = 0;
-    OCR1A = 0;
-    throttle = 0;
-    command.pitch = 0;
-    command.roll = 0;
-    command.yaw = 0;
-    command.flightMode = FlightMode::stabilize;
-    altitudeHold = false;
-    altitudeHoldSetTime = 0;
-    verticalVelocity_pid.off();
   } else {
-    if (command.flightMode == FlightMode::stabilize) {
-      pid::outer::pitch.setMode(AUTOMATIC);
-      pid::outer::roll.setMode(AUTOMATIC);
-    } else if (command.flightMode == FlightMode::acro) {
-      pid::outer::pitch.setMode(MANUAL);
-      pid::outer::roll.setMode(MANUAL);
-      pid::inner::setpoint::pitch = command.pitch;
-      pid::inner::setpoint::roll = command.roll;
-      altitudeHold = false;
-    } else {
-      pid::inner::pitch.off();
-      pid::inner::roll.off();
-      pid::outer::pitch.off();
-      pid::outer::roll.off();
-    }
-    altitudeHold = false;
-    verticalVelocity_pid.off();
-    throttle = command.throttle;
-    // if (command.altitudeHold && command.throttle > 5) {
-    //   altitudeHold = true;
-    //   altitudeHoldSetTime = micros();
-    //   verticalVelocity_pid.on();
-    //   int16_t vvs = command.throttle - 63;
-    //   if (vvs > 10) {
-    //     verticalVelocity_setpoint = vvs / 3.0f;
-    //   } else if (vvs < - 10) {
-    //     verticalVelocity_setpoint = vvs / 3.0f;
-    //   } else {
-    //     verticalVelocity_setpoint = 0.0f;
-    //   }
-    // } else {
-    //   altitudeHold = false;
-    //   altitudeHoldSetTime = 0;
-    //   verticalVelocity_pid.off();
-    //   throttle = command.throttle;
-    // }
-    if (command.flightMode == FlightMode::acro) {
-      altitudeHold = false;
-    }
-    status::communication = Status::normal;
+    config::controller::type = ControllerType::PID; // default to PID controller type
+  } // controller type
+}
+
+
+void updateTelemetryMessage() {
+  /* The telemetry message will be send immediately when a command
+     message is received. It needs to be preloaded. */
+  switch (config::communication::telemetryType()) {
+  case mad::communication::MessageType::telemetryNormal;
+    mad::communication::TelemetryNormal telemetry;
+    telemetry.batteryVoltage_m = (uint16_t)round(batteryVoltage * 1000.0f);
+    telemetry.altitude_c = (int16_t)round(altitude * 100.0f); // max: 320m
+    com::rf24.writeAckPayload(1, telemetry, sizeof(telemetry)); // pipe 1
+    break;
+  default:
+    config::communication::telemetryType = mad::communication::MessageType::telemetryNormal;
+    break;
   }
 }
 
-void handleSetting(Setting & setting) {
-  setting.success = true;
-  switch (setting.id) {
-  case SettingId::dummy:
-    setting.success = false;
-    DEBUGLN("dummy");
-    break;
-  // case SettingId::imuLpf_common:
-  //   if (setting.request) {
-  //     setting.value = (float)config::imu::lowPassFilter::common();
-  //     DEBUGLN("Requested LPF");
-  //   } else {
-  //     setting.success = config::imu::lowPassFilter::common.changeValue(setting.value);
-  //     setting.value = (float)config::imu::lowPassFilter::common();
-  //     imu::mpu6050.setDLPFMode(config::imu::lowPassFilter::common());
-  //     DEBUG("LPF changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
+bool commandHandler(const uint8_t& messageRaw, const uint8_t size) {
+  mad::communication::Command command;
+  /* Most of the values in struct Command are in centi (1e2) (centi-degrees,
+     centi-throttle), to get the 'actual' values divide by 100. */
+  memcpy(&command, &messageRaw, size);
 
-  // case SettingId::imuLpfAv_state:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested LPFav state");
-  //     setting.value = (float)config::imu::lowPassFilter::angularVelocity::state();
-  //   } else {
-  //     setting.success = config::imu::lowPassFilter::angularVelocity::state.changeValue(setting.value);
-  //     setting.value = (float)config::imu::lowPassFilter::angularVelocity::state();
-  //     DEBUG("LPFav state changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-  // case SettingId::imuLpfAv_alpha:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested LPFav alpha");
-  //     setting.value = config::imu::lowPassFilter::angularVelocity::alpha();
-  //   } else {
-  //     setting.success = config::imu::lowPassFilter::angularVelocity::alpha.changeValue(setting.value);
-  //     setting.value = config::imu::lowPassFilter::angularVelocity::alpha();
-  //     config::imu::lowPassFilter::angularVelocity::oneMinusAlpha = 1.0 - setting.value;
-  //     DEBUG("imuLpfAv_alpha changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-
-  // case SettingId::imuLpfAcc_state:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested LPFacc state");
-  //     setting.value = (float)config::imu::lowPassFilter::acceleration::state();
-  //   } else {
-  //     setting.success = config::imu::lowPassFilter::acceleration::state.changeValue(setting.value);
-  //     setting.value = (float)config::imu::lowPassFilter::acceleration::state();
-  //     DEBUG("LPFacc state changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-  // case SettingId::imuLpfAcc_alpha:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested LPFacc alpha");
-  //     setting.value = config::imu::lowPassFilter::acceleration::alpha();
-  //   } else {
-  //     setting.success = config::imu::lowPassFilter::acceleration::alpha.changeValue(setting.value);
-  //     setting.value = config::imu::lowPassFilter::acceleration::alpha();
-  //     config::imu::lowPassFilter::acceleration::oneMinusAlpha = 1.0 - setting.value;
-  //     DEBUG("LPFacc alpha changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-
-  // case SettingId::imuComplementary_alpha:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Complementary alpha");
-  //     setting.value = config::imu::complementary::alpha();
-  //   } else {
-  //     setting.success = config::imu::complementary::alpha.changeValue(setting.value);
-  //     setting.value = config::imu::complementary::alpha();
-  //     config::imu::complementary::oneMinusAlpha = 1.0 - setting.value;
-  //     DEBUG("Complementary alpha changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-
-  // case SettingId::comm_pa:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Pwr amp (comm)");
-  //     setting.value = (float)config::communication::powerAmplification();
-  //   } else {
-  //     setting.success = config::communication::powerAmplification.changeValue(setting.value);
-  //     setting.value = (float)config::communication::powerAmplification();
-  //     comm::rf24.setPALevel(config::communication::powerAmplification());
-  //     DEBUG("Pwr amp (comm) changed to "); DEBUGLN(setting.value);
-  //   }
-  // case SettingId::comm_dataRate:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Data rate (comm)");
-  //     setting.value = (float)config::communication::dataRate();
-  //   } else {
-  //     setting.success = config::communication::dataRate.changeValue(setting.value);
-  //     setting.value = (float)config::communication::dataRate();
-  //     comm::rf24.setDataRate(config::communication::dataRate());
-  //     DEBUG("Data rate (comm) changed to "); DEBUGLN(setting.value);
-  //   }
-  // case SettingId::comm_retryDelay:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Retry delay (comm)");
-  //     setting.value = (float)config::communication::retryDelay();
-  //   } else {
-  //     setting.success = config::communication::retryDelay.changeValue(setting.value);
-  //     setting.value = (float)config::communication::retryDelay();
-  //     comm::rf24.setRetries(config::communication::retryDelay(),
-  //                           config::communication::retryCount());
-  //     DEBUG("Retry delay (comm) changed to "); DEBUGLN(setting.value);
-  //   }
-  // case SettingId::comm_retryCount:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Retry count (comm)");
-  //     setting.value = (float)config::communication::retryCount();
-  //   } else {
-  //     setting.success = config::communication::retryCount.changeValue(setting.value);
-  //     setting.value = (float)config::communication::retryCount();
-  //     comm::rf24.setRetries(config::communication::retryDelay(),
-  //                           config::communication::retryCount());
-  //     DEBUG("Retry count (comm) changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-  // case SettingId::comm_crcLength:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested CRC length (comm)");
-  //     setting.value = (float)config::communication::crcLength();
-  //   } else {
-  //     setting.success = config::communication::crcLength.changeValue(setting.value);
-  //     setting.value = (float)config::communication::crcLength();
-  //     comm::rf24.setCRCLength(config::communication::crcLength());
-  //     DEBUG("CRC length (comm) changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-  case SettingId::commTelemetry_type:
-    if (setting.request) {
-      DEBUGLN("?Tmt");
-      setting.value = (float)config::communication::telemetry::type();
-    } else {
-      setting.success = config::communication::telemetry::type.changeValue(setting.value);
-      setting.value = (float)config::communication::telemetry::type();
-      DEBUG("Tmt>"); DEBUGLN(setting.value);
-    }
-    break;
-
-  case SettingId::regInner_p:
-    if (setting.request) {
-      DEBUGLN("?Pi");
-      setting.value = config::regulation::inner::P();
-    } else {
-      setting.success = config::regulation::inner::P.changeValue(setting.value);
-      setting.value = config::regulation::inner::P();
-      pid::inner::pitch.setTunings(setting.value);
-      pid::inner::roll.setTunings(setting.value);
-      DEBUG("Pi>"); DEBUGLN(setting.value);
-    }
-    break;
-  case SettingId::regInner_yawP:
-    if (setting.request) {
-      DEBUGLN("?Pi_yaw");
-      setting.value = config::regulation::inner::yawP();
-    } else {
-      setting.success = config::regulation::inner::yawP.changeValue(setting.value);
-      setting.value = config::regulation::inner::yawP();
-      pid::inner::yaw.setTunings(setting.value);
-      DEBUG("Pi_yaw>"); DEBUGLN(setting.value);
-    }
-    break;
-  // case SettingId::regInner_outputLimit:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Output limit (inner)");
-  //     setting.value = (float)config::regulation::inner::outputLimit();
-  //   } else {
-  //     setting.success = config::regulation::inner::outputLimit.changeValue(setting.value);
-  //     setting.value = (float)config::regulation::inner::outputLimit();
-  //     pid::inner::pitch.setOutputLimits(config::regulation::inner::outputLimit());
-  //     pid::inner::roll.setOutputLimits(config::regulation::inner::outputLimit());
-  //     pid::inner::yaw.setOutputLimits(config::regulation::inner::outputLimit());
-  //     DEBUG("Output limit (inner) changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-  case SettingId::regOuter_p:
-    if (setting.request) {
-      DEBUGLN("?Po");
-      setting.value = config::regulation::outer::P();
-    } else {
-      setting.success = config::regulation::outer::P.changeValue(setting.value);
-      setting.value = config::regulation::outer::P();
-      pid::outer::pitch.setTunings(setting.value, config::regulation::outer::I());
-      pid::outer::roll.setTunings(setting.value, config::regulation::outer::I());
-      DEBUG("Po>"); DEBUGLN(setting.value);
-    }
-    break;
-  case SettingId::regOuter_i:
-    if (setting.request) {
-      DEBUGLN("?Io");
-      setting.value = config::regulation::outer::I();
-    } else {
-      setting.success = config::regulation::outer::I.changeValue(setting.value);
-      setting.value = config::regulation::outer::I();
-      pid::outer::pitch.setTunings(config::regulation::outer::P(), setting.value);
-      pid::outer::roll.setTunings(config::regulation::outer::P(), setting.value);
-      DEBUG("Io>"); DEBUGLN(setting.value);
-    }
-    break;
-  // case SettingId::regOuter_updateRate:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Outer update rate");
-  //     setting.value = (float)config::regulation::outer::updateRate();
-  //   } else {
-  //     setting.success = config::regulation::outer::updateRate.changeValue(setting.value);
-  //     setting.value = (float)config::regulation::outer::updateRate();
-  //     pid::outer::pitch.setUpdateRate(config::regulation::outer::updateRate());
-  //     pid::outer::roll.setUpdateRate(config::regulation::outer::updateRate());
-  //     DEBUG("Outer update rate changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-  // case SettingId::regOuter_outputLimit:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Outer output limit");
-  //     setting.value = (float)config::regulation::outer::outputLimit();
-  //   } else {
-  //     setting.success = config::regulation::outer::outputLimit.changeValue(setting.value);
-  //     setting.value = (float)config::regulation::outer::outputLimit();
-  //     pid::inner::pitch.setOutputLimits(config::regulation::outer::outputLimit());
-  //     pid::inner::roll.setOutputLimits(config::regulation::outer::outputLimit());
-  //     pid::inner::yaw.setOutputLimits(config::regulation::outer::outputLimit());
-  //     DEBUG("Outer output limit changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-  // case SettingId::reg_minRegThrottle:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Min reg throttle");
-  //     setting.value = (float)config::regulation::minimumRegulationThrottle();
-  //   } else {
-  //     setting.success = config::regulation::minimumRegulationThrottle.changeValue(setting.value);
-  //     setting.value = (float)config::regulation::minimumRegulationThrottle();
-  //     DEBUG("Min reg throttle changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-  // case SettingId::reg_maxBaseThrottle:
-  //   if (setting.request) {
-  //     DEBUGLN("Requested Max base throttle");
-  //     setting.value = (float)config::regulation::maximumBaseThrottle();
-  //   } else {
-  //     setting.success = config::regulation::maximumBaseThrottle.changeValue(setting.value);
-  //     setting.value = (float)config::regulation::maximumBaseThrottle();
-  //     DEBUG("Max base throttle changed to "); DEBUGLN(setting.value);
-  //   }
-  //   break;
-
-  case SettingId::indication_armsLevel:
-    if (setting.request) {
-      DEBUGLN("?Arms lvl");
-      setting.value = (float)config::indication::armsLevel();
-    } else {
-      setting.success = config::indication::armsLevel.changeValue(setting.value);
-      setting.value = (float)config::indication::armsLevel();
-      // indication::arms(expMap[clamp(config::indication::armsLevel(), 0, 13)]);
-      DEBUG("Arms lvl>"); DEBUGLN(setting.value);
-    }
-    break;
-  case SettingId::indication_lamp:
-    if (setting.request) {
-      DEBUGLN("?Lamp");
-      setting.value = (float)config::indication::lamp();
-    } else {
-      setting.success = config::indication::lamp.changeValue(setting.value);
-      setting.value = (float)config::indication::lamp();
-      indication::lamp(config::indication::lamp());
-      DEBUG("Lamp>"); DEBUGLN(setting.value);
-    }
-    break;
-  case SettingId::regAlt_p:
-    if (setting.request) {
-      DEBUGLN("?AltP");
-      setting.value = config::regulation::altitude::P();
-    } else {
-      setting.success = config::regulation::altitude::P.changeValue(setting.value);
-      setting.value = config::regulation::altitude::P();
-      verticalVelocity_pid.setTunings(setting.value, config::regulation::altitude::P(), 0.0f, config::regulation::altitude::D());
-      DEBUG("AltP>"); DEBUGLN(setting.value);
-    }
-    break;
-  case SettingId::regAlt_d:
-    if (setting.request) {
-      DEBUGLN("?AltD");
-      setting.value = config::regulation::altitude::D();
-    } else {
-      setting.success = config::regulation::altitude::D.changeValue(setting.value);
-      setting.value = config::regulation::altitude::D();
-      verticalVelocity_pid.setTunings(setting.value, config::regulation::altitude::P(), 0.0f, config::regulation::altitude::D());
-      DEBUG("AltD>"); DEBUGLN(setting.value);
-    }
-  // case SettingId::imuCalibrate:
-  //   // calibrate
-  //   // DEBUG("Cal>\n");
-  //   break;
-  default:
-    setting.success = false;
-    DEBUG("Unrec sId: "); DEBUGLN((uint8_t)setting.id);
-    break;
-  } //switch (setting.id)
-  comm::rf24.setResponse(&setting, sizeof(setting));
+  static int8_t remoteId = command.remoteId;
+  if (command.remoteId != remoteId
+      || command.throttle_c < 0 || command.throttle_c > 12700
+      || command.pitch_c < -30000 || command.pitch_c > 30000
+      || command.roll_c < -30000 || command.roll_c > 30000
+      || command.yaw_c < -30000 || command.yaw_c > 30000
+      || (int8_t)command.flyMode < (int8_t)mad::FlyMode::first
+      || (int8_t)command.flyMode > (int8_t)mad::FlyMode::last) {
+    return false;
+  } else {
+    control.throttle = (float)command.throttle_c / 100.0f;
+    control.pitch = (float)command.pitch_c / 100.0f;
+    control.roll = (float)command.roll_c / 100.0f;
+    control.yawVelocity = (float)command.yaw_c / 100.0f;
+    control.flyMode = command.flyMode;
+    control.holdAltitude = command.holdAltitude;
+    return true;
+  }
 }
 
+bool settingHandler(const uint8_t& messageRaw, const uint8_t size) {
+  // Indication feedback
+  board::indication::signal(true);
+  board::indication::warning(true);
+
+  mad::communication::Setting setting;
+  memcpy(&setting, &messageRaw, size);
+  setting.success = false;
+
+  switch (setting.id) {
+  case mad::SettingId::innerP:
+    if (!setting.request) {
+      setting.success = (config::controller::inner::p = setting.value);
+    }
+    setting.value = config::controller::inner::p();
+    controller::inner::pitch.setP(config::controller::inner::p());
+    controller::inner::roll.setP(config::controller::inner::p());
+    break;
+  case mad::SettingId::innerYawP:
+    if (!setting.request) {
+      setting.success = (config::controller::inner::yaw::p = setting.value);
+    }
+    setting.value = config::controller::inner::yaw::p();
+    controller::inner::yaw.setP(config::controller::inner::yaw::p());
+    break;
+  case mad::SettingId::innerYawI:
+    if (!setting.request) {
+      setting.success = (config::controller::inner::yaw::i = setting.value);
+    }
+    setting.value = config::controller::inner::yaw::i();
+    controller::inner::yaw.setI(config::controller::inner::yaw::i());
+    break;
+  case mad::SettingId::outerP:
+    if (!setting.request) {
+      setting.success = (config::controller::outer::p = setting.value);
+    }
+    setting.value = config::controller::outer::p();
+    controller::outer::pitch.setP(config::controller::outer::p());
+    controller::outer::roll.setP(config::controller::outer::p());
+    break;
+  case mad::SettingId::outerI:
+    if (!setting.request) {
+      setting.success = (config::controller::outer::i = setting.value);
+    }
+    setting.value = config::controller::outer::i();
+    controller::outer::pitch.setI(config::controller::outer::i());
+    controller::outer::roll.setI(config::controller::outer::i());
+    break;
+  case mad::SettingId::armsLevel:
+    if (!setting.request) {
+      setting.success = (config::indication::armsLevel = setting.value);
+    }
+    setting.value = config::indication::armsLevel();
+    break;
+  case mad::SettingId::lampState:
+    if (!setting.request) {
+      setting.success = (config::indication::lampState = setting.value);
+    }
+    setting.value = config::indication::lampState();
+    board::indication::lamp(config::indication::lampState());
+    break;
+  case mad::SettingId::telemetryType:
+    if (!setting.request) {
+      setting.success = (config::communication::telemetryType = setting.value);
+    }
+    setting.value = config::communication::telemetryType();
+    break;
+  case mad::SettingId::calibrateImu:
+// if throttle is zero
+// lock drone and start calibration
+// save old calibration, if throttle goes high set it and abort calibration
+    break;
+  default:
+
+    break;
+  }
+
+  com.stopListening();
+  bool writeSuccess = com.write(&setting, sizeof(setting), 1);
+  com.startListening();
+
+  return (setting.success && writeSuccess);
+}

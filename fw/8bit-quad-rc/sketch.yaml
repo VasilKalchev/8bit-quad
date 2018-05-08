@@ -1,6 +1,0 @@
-profiles:
-  rc:
-    fqbn: 8bit-quad:avr:rc
-    platforms:
-      - platform: 8bit-quad:avr (1.0.0)
-        platform_index_url: https://raw.githubusercontent.com/VasilKalchev/8bit-quad/main/package_8bit-quad_index.json
