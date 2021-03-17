@@ -1,177 +1,63 @@
-# 8bit-quad
+# 8bit-quad, abandoned rewrite: portable HAL
 
-Firmware for a custom-built quadcopter based on the ATmega328 microcontroller.
+**This branch is a dead end, kept for the record.** It does not compile and was
+never flown. `main` is the working firmware.
 
-The project implements the complete flight controller firmware, including attitude estimation, stabilization, PID control and radio communication. It was designed around a resource-constrained 8-bit MCU and uses a simple sequential execution model.
+A clean rewrite of the flight controller attempted between 2021-03-15 and
+2021-04-03, in parallel with the reorganization that became the 2021 commits
+on `main`. Two commits, because it survives as two folders: a bare skeleton,
+then a fuller version with the hardware/portable/software split.
 
-![8bit-quad](gallery/20180330_013913.webp)
+## The idea
 
-This is the earliest surviving revision (May 2018): a working nRF24L01+-linked
-flight controller and matching remote transmitter, running on the custom
-"8bit-quad" ATmega328 board pair. It flies in `acro` and `stabilize`
-(angle-hold) modes.
+Two things at once.
 
-## Features
+**A chip-agnostic hardware layer.** Everything the firmware touches goes
+behind a `portable::` namespace - `clk`, `gpio`, `pwm`, `tmr`, `adc`, `rf`,
+`pwr` - with the ATmega328 implementation under `src/portable/MAD_2/v100/`
+and a `boards.hpp` selecting a board. The intent is that the flight code
+stops knowing about AVR registers, so a different MCU means a new folder
+rather than a rewrite.
 
-- Attitude estimation (Mahony sensor fusion)
-- Acro and stabilize (angle-hold) flight modes
-- Cascaded PID control (outer angle loop, inner rate loop)
-- nRF24L01+ radio link with a custom command/telemetry/setting packet protocol
-- Multiple selectable telemetry payloads (regulation, IMU, motors)
-- Runtime-configurable settings persisted to EEPROM
-- EEPROM black-box logging of battery voltage/current
-- Battery voltage monitoring with a low/warning/error status ladder
-- Failsafe on radio-link timeout (throttle cut)
+**A declared pipeline.** Every stage in `loop()` is introduced by a doc
+comment stating its inputs, outputs, which sub-cycles it runs on, how tight
+its timing is, its priority, and which flight modes it applies to. The
+working firmware's `loop()` is a long sequence of sections whose ordering
+constraints are implicit; this makes them explicit at each stage.
 
-## Hardware
+It also sketches a GPS-fed position hold, the only one in the project's
+history. It never got further than a stage declaration and a host-side
+simulation, `sim/pos_ctrl.cpp`, which works out how to turn a position error
+plus the quad's heading into pitch and roll setpoints.
 
-### Flight controller
+## Why it stopped
 
-- MCU: ATmega328
-- Framework: Arduino (custom core, see `hardware/`)
-- IMU: MPU9255
-- Radio: nRF24L01+
+Unknown; there is no note. The scope is the likely answer: the portable layer
+was never filled in. `adc.hpp`, `gpio.hpp`, `rf.hpp` and the board
+`include.hpp` are zero-length files, and the sketch calls into them anyway,
+so it cannot build. Meanwhile the mainline reorganization it ran alongside
+did reach a working state, and that is what got flown.
 
-![fc-board](gallery/20180117_133531.webp)
+## What is on this branch
 
-### Remote controller
+`fw/8bit-quad-fc/` is the attempt. Everything else is inherited from the
+commit it forks from.
 
-Custom ATmega328 transmitter board, nRF24L01+ radio, serial command interface
-for configuration over USB/UART. This is 2018 code, written alongside this
-revision and never modified afterwards; it shares the wire protocol
-byte-for-byte (see `doc/changelog.md`).
+- The sketch was `flight_controller.ino`, renamed to match the repository's
+  layout so diffs against the parent are readable.
+- `sim/` holds two host-side programs, not Arduino sketches: `pos_ctrl.cpp`
+  and `sin_cos.cpp`, both `#include <iostream>` and were run on a PC.
+- The second commit keeps `FC-alpha2.ino`, the author's reference copy of the
+  mainline sketch as it stood around 2021-03-19. It is not part of the build;
+  it is the only surviving trace of the mainline between the two commits on
+  `main`, which is why it is kept.
+- Bench sketches are renamed to the repository's names. The attempt's own
+  `IMU_zero` is dropped: it is an older copy of the same offset-finder as
+  `calib-imu`.
 
-## Flight controller implementation
+This forked from the mainline of around 2021-03-18, after the IMU driver work
+but before the namespace rename of 2021-03-24. Its parent here is the
+2018-05-04 commit, since no commit exists at that intermediate state.
 
-Single-threaded, fixed-period main loop (no RTOS/scheduler): a busy-wait
-keeps the loop cycling at a fixed period, subdivided into sub-cycles so that
-slower tasks (radio servicing, battery read, altitude/pressure read,
-indication LEDs) each run on their own sub-cycle instead of every iteration.
-
-- **Sensor reading**: IMU (gyro + accel) read every cycle; barometer read on
-  a slower sub-cycle for altitude.
-- **Sensor fusion**: Mahony filter (gyro + accel only, no magnetometer),
-  producing a quaternion converted to pitch/roll/yaw.
-- **Attitude representation**: Euler pitch/roll from the fusion output; yaw
-  rate obtained by differentiating the fused yaw angle.
-- **Stabilization**: cascaded PID - an outer angle loop (pitch/roll) feeds
-  setpoints to an inner rate loop (pitch/roll/yaw), which drives the motor
-  mix. `acro` mode drives the rate loop directly from the sticks, skipping
-  the angle loop.
-- **Motor mix**: quad-X mix, clamped, written straight to the timer compare
-  registers (`OCR0A/B`, `OCR1A/B`) - no ESC command protocol, just PWM duty
-  cycle.
-- **Communication**: nRF24L01+ packets (`Command`/`Setting`/`Telemetry*`)
-  drained once per outer cycle; a link timeout zeroes the stick inputs and
-  disarms.
-- **Altitude**: BMP280 pressure → relative altitude, and a vertical-speed PID
-  exists in code, but nothing in this revision's command handling actually
-  engages it - it's dead weight here, not a working feature yet.
-
-This is the first revision in the reconstructed history, so there's no
-previous revision to compare against.
-
-## Development environment
-
-- Arduino IDE (or `arduino-cli`)
-- Custom Arduino core, see `hardware/` and the Building section below
-- Libraries vendored inside the core, under
-  `hardware/8bit-quad/avr/libraries/` (RF24, MPU6050, MPU925x_I2C,
-  MahonyAHRS, UART_atmega328, and a BMP280 driver) - some of these are no
-  longer distributed through Arduino's Library Manager, so they're frozen
-  here rather than assumed to be installed
-
-### Building
-
-This uses a custom Arduino core, so it won't show up under a stock
-"Arduino Uno" board.
-
-**Boards Manager (recommended):**
-
-1. In Arduino IDE **File > Preferences > Additional boards manager URLs**,
-   add:
-   `https://raw.githubusercontent.com/VasilKalchev/8bit-quad/main/package_8bit-quad_index.json`
-2. Install "8bit-quad AVR Boards" from **Tools > Board > Boards Manager**.
-
-The package is the core with the vendored libraries inside it, so there is
-nothing else to install.
-
-**This revision needs core `1.0.0`.** Boards Manager offers more than one
-version; they carry different sets of vendored libraries, and a core meant for
-another revision will not necessarily compile this one. The version is in
-`hardware/8bit-quad/avr/platform.txt`, which is the same line
-`hardware/package.sh` reads when it builds the archive.
-
-`arduino-cli` can pin it for you. Each sketch carries a `sketch.yaml` naming
-this revision's core, so
-
-```sh
-arduino-cli compile --profile fc
-arduino-cli compile --profile rc
-```
-
-fetches exactly that core and builds against it with nothing installed
-beforehand.
-
-Core `1.0.0` is the nearest published core to this revision rather than an
-exact match: it carries the `MPU925x_I2C` 1000 us read timeout that this
-revision predates, so `fc` builds 42 bytes smaller than it does against the
-core in this repository. For a build identical to this revision, use the
-manual route below.
-
-**Manual:**
-
-The repo is already laid out as an Arduino sketchbook (`hardware/8bit-quad`),
-so point **File > Preferences > Sketchbook location** at this repo and
-restart. Nothing needs copying. The IDE only auto-detects `hardware/` inside
-the sketchbook location, so having it next to the sketch isn't enough on its
-own.
-
-Either way, an "8bit-quad" section appears under **Tools > Board** with
-`8bit-quad_fc` and `8bit-quad_rc` entries. Open
-`fw/8bit-quad-fc/8bit-quad-fc.ino` (or `fw/8bit-quad-rc/8bit-quad-rc.ino`)
-with File > Open, select the matching board, and build/upload as usual. The
-sketches live under `fw/`, so they won't appear in the Sketchbook menu.
-
-To cut a new release of the core, run `hardware/package.sh` and put the
-checksum and size it prints into `package_8bit-quad_index.json`, then attach
-the archive to a `hardware-v<version>` release.
-
-## Repository
-
-This repository was reconstructed retroactively from archived development
-snapshots that originally existed as standalone project folders.
-
-The snapshots have been converted into Git commits representing the
-development timeline. Abandoned development paths have been preserved as Git
-branches.
-
-The detailed reconstruction history and version changes are documented in:
-
-- [`/doc/changelog.md`](doc/changelog.md)
-- [`/doc/history.md`](doc/history.md)
-
-Every revision is tagged with its date, `fw-2018.05.04` through
-`fw-2022.04.03`. The firmware was never versioned while it was being written,
-so the dates are all there is. The Arduino core is versioned separately, as
-`hardware-v1.0.0` and `hardware-v1.1.0`.
-
-## Gallery
-
-The [`/gallery/`](gallery/) directory contains photos documenting the hardware and
-development process.
-
-[![Gallery preview](gallery/preview.webp)](gallery/)
-
-
-Videos:
-
-- [First flights (pre 2018)](https://youtu.be/U1KzGiQBYQM)
-- [Etching the flight controller PCB](https://youtu.be/nzKjSb2GAe4)
-- [Ground view while flying](https://youtu.be/9E8ZXUsTuo8)
-
-## Related repositories
-
-- [`8bit-quad.hw`](https://github.com/VasilKalchev/8bit-quad.hw) - the
-  `8bit-quad-fc` board design. The remote never had one, it was hand wired on
-  protoboard.
+See [`doc/history.md`](doc/history.md) for how the whole lineage was
+reconstructed.
