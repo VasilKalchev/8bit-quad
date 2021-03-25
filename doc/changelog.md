@@ -71,3 +71,66 @@ firmware for the same reason.
   - `fw/8bit-quad-fc/src/control/Altitude.hpp` and
     `fw/8bit-quad-rc/src/config/EepromSetting.hpp` are unused stub/dead
     files carried over as-is.
+
+## 2021-03-25
+
+- `fw/8bit-quad-fc` rebranded/reorganized: renamed namespaces
+  (`pid::inner/outer` -> `ctlr::att::rate/angle`,
+  `config::regulation` -> `config::ctlr::att::rate/angle`). The rename itself
+  is dated: `config.hpp` was last written 2021-03-24, the day before the
+  snapshot this revision is taken from.
+- I2C clock settled on a single 800 kHz call. The 2018 revision set 400 kHz
+  early in `setup()` and 800 kHz again later, so the effective rate was
+  already 800 kHz but stated twice.
+- Retuned: `yawI` 0.03 -> 0.05, `battery::alpha` 0.98 -> 0.7, and a new
+  `yaw_updateRate` setting for the yaw rate PID.
+- Pressure sampling gets a 3-sample median filter (`middle_of_3`) before its
+  existing low-pass filter, and boot-time pressure calibration is tightened
+  (faster warm-up, averaged samples) - an accuracy improvement to the read
+  path itself, independent of what's done with the resulting altitude value.
+- Removed the unused/never-engaged `MPU6050` driver (`src/imu/MPU6050.{hpp,
+  cpp}`) - `MPU9255` is the only IMU from this point on.
+- Removed the empty, never-included `cfg.hpp` scaffolding stub, the
+  `DEBUG_ACCELEROMETER_ANGLE` switch, whose only use site went with the
+  complementary-filter code, and large blocks of superseded commented-out code (an old EEPROM climb/fall-speed
+  black-box logger, stale debug prints, a pasted raw calibration data log)
+  that had accumulated in `main.ino`/`MPU9255.cpp`.
+- Altitude-hold is not carried into this repository. The source snapshot has
+  it wired up (a vertical-speed PID engaged via `Command.altitudeHold`), but
+  it was never a working feature, and the author himself commented it out
+  nine days later, so it is left out from here rather than carried and then
+  removed. `Command.altitudeHold` and the `SettingId::regAlt_p`/`regAlt_d`
+  enum values stay in `comm_packets.hpp` for wire-protocol numbering
+  compatibility with `fw/8bit-quad-rc`, but nothing on the `fc` side reads or
+  handles them (a setting request for either falls through to
+  `handleSetting()`'s `default` case). Basic barometer altitude computation
+  (`relativeAltitude`, reported in `Telemetry`) is kept, since it existed
+  independent of the hold feature.
+- `fw/8bit-quad-rc` is unchanged at this point in history.
+- `fw/tool`: `calib-imu` updated to this revision's own copy of the
+  offset-finder, which adds sampling delays and narrows its search
+  dynamically; the previous commit carries a 2018 copy of the same sketch.
+  Added `trim-imu`, a bench sketch for dumping raw IMU readings (MPU6050 or
+  MPU9255, selectable) to help manually trim offsets.
+- Not carried over from the source snapshot, alongside altitude-hold:
+  - The complementary-filter attitude estimator, an alternative to Mahony
+    behind `#if FUSION_COMPLEMENTARY_FILTER`. It could not be selected as
+    found: `config::imu::complementary::alpha`, `oneMinusAlpha` and
+    `config::imu::epsilon` are all commented out in the source's
+    `config.hpp`, so enabling it would not compile. `MAHONY_FUSION` is left
+    as the sole, always-true branch. The 2018 revision kept the same code
+    commented out in the sketch; the source restructured it into a live
+    `#if` here without restoring what it needs.
+  - The `ANGULAR_RATE_DIRECT_FROM_GYROSCOPE` /
+    `ANGULAR_RATE_DIFFERENTIATE_FROM_MAHONY` switch. The selected branch
+    (differentiate) is kept as plain code; the unselected one-line gyro read
+    and the switch itself are dropped.
+  - Six debug blocks that were live but switched off: `DEBUG_EEPROM`,
+    `BLACK_BOX_HOVER_VOLTAGE`, `PRINT_BATTERY_VOLTAGE`, `PRINT_THROTTLE`,
+    `DEBUG_ANGLE_CTRL_PERIOD`, `DEBUG_RATE_CTRL_PERIOD`.
+  - `DEBUG_PIN` and the four `DBG_PIN_*` defines, which the source defines
+    but never references anywhere in the sketch.
+- The yaw rate's `dt` is `uint32_t` here, matching the source. At a 3100 us
+  cycle it truncates to zero and `avYaw` divides by zero. Kept rather than
+  quietly fixed: it is a regression against the 2018 revision, which used a
+  float, and the next revision is where it goes away.

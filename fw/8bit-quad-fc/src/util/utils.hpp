@@ -28,3 +28,5 @@ enum class Status {
 
 float calculateAltitude(float pressure, float relativeToPressure,
                         float temperature=0);
+
+float middle_of_3(float a, float b, float c);

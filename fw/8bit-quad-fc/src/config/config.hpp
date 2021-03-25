@@ -10,6 +10,10 @@ namespace config {
 
 const uint16_t cycleTime = 3100;
 
+// Marks the first EEPROM address not used by any EepromSetting above -
+// free for future black-box/logging use.
+#define EE_FIRST_FREE_ADDRESS (200)
+
 namespace debug {
 
 #define DEBUGGING false
@@ -21,7 +25,6 @@ extern const uint32_t baud;
 
 #define DEBUG_ANGULAR_VELOCITY false
 #define DEBUG_ACCELERATION false
-#define DEBUG_ACCELEROMETER_ANGLE false
 #define DEBUG_ATTITUDE false
 
 #define DEBUG_PID_PITCH false
@@ -72,15 +75,17 @@ extern EepromSetting<int8_t> type;
 } //namespace telemetry
 } //namespace communication
 
-namespace regulation {
-namespace inner {
+namespace ctlr {
+namespace att {
+namespace rate {
 extern EepromSetting<float> P;
 extern EepromSetting<float> yawP;
 extern const float yawI;
+extern const uint32_t yaw_updateRate;
 extern const int16_t outputLimit;
 // extern EepromSetting<int16_t> outputLimit;
-} //namespace inner
-namespace outer {
+} // namespace rate
+namespace angle {
 extern EepromSetting<float> P;
 extern EepromSetting<float> I;
 extern const uint32_t updateRate;
@@ -88,16 +93,13 @@ extern const uint32_t updateRate;
 extern const int16_t outputLimit;
 // extern EepromSetting<int16_t> outputLimit;
 // extern const uint32_t updateRateTolerance;
-} //namespace outer
+} // namespace angle
+} // namespace att
 extern const uint8_t minimumRegulationThrottle;
 extern const uint8_t maximumBaseThrottle;
 // extern EepromSetting<uint8_t> minimumRegulationThrottle;
 // extern EepromSetting<uint8_t> maximumBaseThrottle;
-namespace altitude {
-extern EepromSetting<float> P;
-extern EepromSetting<float> D;
-} //namespace altitude
-} //namespace regulation
+} //namespace ctlr
 
 namespace indication {
 extern const uint32_t period;

@@ -39,11 +39,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
   If an MPU6050 
-      * is an ideal member of its tribe, 
-      * is properly warmed up, 
-      * is at rest in a neutral position, 
-      * is in a location where the pull of gravity is exactly 1g, and 
-      * has been loaded with the best possible offsets, 
+	  * is an ideal member of its tribe, 
+	  * is properly warmed up, 
+	  * is at rest in a neutral position, 
+	  * is in a location where the pull of gravity is exactly 1g, and 
+	  * has been loaded with the best possible offsets, 
 then it will report 0 for all accelerations and displacements, except for 
 Z acceleration, for which it will report 16384 (that is, 2^14).  Your device 
 probably won't do quite this well, but good offsets will all get the baseline 
@@ -58,11 +58,11 @@ a few minutes to get there.
 
   Along the way, it will generate a dozen or so lines of output, showing that for each 
 of the 6 desired offsets, it is 
-      * first, trying to find two estimates, one too low and one too high, and
-      * then, closing in until the bracket can't be made smaller.
+	  * first, trying to find two estimates, one too low and one too high, and
+	  * then, closing in until the bracket can't be made smaller.
 
   The line just above the "done" line will look something like
-    [567,567] --> [-1,2]  [-2223,-2223] --> [0,1] [1131,1132] --> [16374,16404] [155,156] --> [-1,1]  [-25,-24] --> [0,3] [5,6] --> [0,4]
+	[567,567] --> [-1,2]  [-2223,-2223] --> [0,1] [1131,1132] --> [16374,16404] [155,156] --> [-1,1]  [-25,-24] --> [0,3] [5,6] --> [0,4]
 As will have been shown in interspersed header lines, the six groups making up this
 line describe the optimum offsets for the X acceleration, Y acceleration, Z acceleration,
 X gyro, Y gyro, and Z gyro, respectively.  In the sample shown just above, the trial showed
@@ -73,24 +73,34 @@ and so on.
 ===============================================
 */
 
+// #define IMU_MPU6050
+#define IMU_MPU925X
+
 // I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
 // for both classes must be in the include path of your project
 #include "I2Cdev.h"
-#include "MPU6050.h"
+
+#if defined(IMU_MPU6050)
+  #include <MPU6050.h>
+#elif defined(IMU_MPU925X)
+  #include <MPU925x_I2C.hpp>
+#endif
 
 // Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
 // is used in I2Cdev.h
 #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-    #include "Wire.h"
+	#include "Wire.h"
 #endif
 
 // class default I2C address is 0x68
-// specific I2C addresses may be passed as a parameter here
 // AD0 low = 0x68 (default for InvenSense evaluation board)
 // AD0 high = 0x69
-MPU6050 accelgyro;
-//MPU6050 accelgyro(0x69); // <-- use for AD0 high
 
+#if defined(IMU_MPU6050)
+  MPU6050 accelgyro;
+#elif defined(IMU_MPU925X)
+  MPU925x_I2C accelgyro;
+#endif
 
 const char LBRACKET = '[';
 const char RBRACKET = ']';
@@ -109,218 +119,244 @@ const int usDelay = 3150;   // empirical, to hold sampling to 200 Hz
 const int NFast =  1000;    // the bigger, the better (but slower)
 const int NSlow = 5000;    // ..
 const int LinesBetweenHeaders = 5;
-      int LowValue[6];
-      int HighValue[6];
-      int Smoothed[6];
-      int LowOffset[6];
-      int HighOffset[6];
-      int Target[6];
-      int LinesOut;
-      int N;
-      
-void ForceHeader()
-  { LinesOut = 99; }
-    
-void GetSmoothed()
-  { int16_t RawValue[6];
-    int i;
-    long Sums[6];
-    for (i = iAx; i <= iGz; i++)
-      { Sums[i] = 0; }
+	  int LowValue[6];
+	  int HighValue[6];
+	  int Smoothed[6];
+	  int LowOffset[6];
+	  int HighOffset[6];
+	  int Target[6];
+	  int LinesOut;
+	  int N;
+
+
+void ForceHeader() {
+	LinesOut = 99;
+}
+	
+void ReadImuAvg() {
+	int16_t RawValue[6];
+	int i;
+	long Sums[6];
+	for (i = iAx; i <= iGz; i++) {
+		Sums[i] = 0;
+	}
 //    unsigned long Start = micros();
 
-    for (i = 1; i <= N; i++)
-      { // get sums
-        accelgyro.getMotion6(&RawValue[iAx], &RawValue[iAy], &RawValue[iAz], 
-                             &RawValue[iGx], &RawValue[iGy], &RawValue[iGz]);
-        if ((i % 500) == 0)
-          Serial.print(PERIOD);
-        delayMicroseconds(usDelay);
-        for (int j = iAx; j <= iGz; j++)
-          Sums[j] = Sums[j] + RawValue[j];
-      } // get sums
+	for (i = 1; i <= N; i++) { // get sums
+		#if defined(IMU_MPU6050)
+		accelgyro.getMotion6(&RawValue[iAx], &RawValue[iAy], &RawValue[iAz], 
+							 &RawValue[iGx], &RawValue[iGy], &RawValue[iGz]);
+		#elif defined(IMU_MPU925X)
+		accelgyro.getAccelAndGyroRaw(&RawValue[iAx], &RawValue[iAy], &RawValue[iAz], 
+									 &RawValue[iGx], &RawValue[iGy], &RawValue[iGz]);
+		#endif
+
+		if ((i % 500) == 0) { Serial.print(PERIOD); }
+		delayMicroseconds(usDelay);
+
+		for (int j = iAx; j <= iGz; j++) {
+		  Sums[j] = Sums[j] + RawValue[j];
+		}
+	} // get sums
+
 //    unsigned long usForN = micros() - Start;
 //    Serial.print(" reading at ");
 //    Serial.print(1000000/((usForN+N/2)/N));
 //    Serial.println(" Hz");
-    for (i = iAx; i <= iGz; i++)
-      { Smoothed[i] = (Sums[i] + N/2) / N ; }
-  } // GetSmoothed
 
-void Initialize()
-  {
-    // join I2C bus (I2Cdev library doesn't do this automatically)
-    #if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
-        Wire.begin();
-    #elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
-        Fastwire::setup(400, true);
-    #endif
+	for (i = iAx; i <= iGz; i++) {
+		Smoothed[i] = (Sums[i] + N/2) / N;
+	}
+} // ReadImuAvg
 
-    Serial.begin(2000000);
+void Initialize() {
+	// join I2C bus (I2Cdev library doesn't do this automatically)
+	#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+		Wire.begin();
+	#elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
+		Fastwire::setup(400, true);
+	#endif
 
-    // initialize device
-    Serial.println("Initializing I2C devices...");
-    accelgyro.initialize();
+	Serial.begin(2000000);
 
-    // verify connection
-    Serial.println("Testing device connections...");
-    Serial.println(accelgyro.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
-  } // Initialize
+	// initialize device
+	Serial.println("Initializing I2C devices...");
+	accelgyro.initialize();
 
-void SetOffsets(int TheOffsets[6])
-  { accelgyro.setXAccelOffset(TheOffsets [iAx]);
-    accelgyro.setYAccelOffset(TheOffsets [iAy]);
-    accelgyro.setZAccelOffset(TheOffsets [iAz]);
-    accelgyro.setXGyroOffset (TheOffsets [iGx]);
-    accelgyro.setYGyroOffset (TheOffsets [iGy]);
-    accelgyro.setZGyroOffset (TheOffsets [iGz]);
-  } // SetOffsets
+	// verify connection
+	Serial.println("Testing device connections...");
+	Serial.println(accelgyro.testConnection() ? "MPU6050 connection successful" : "MPU6050 connection failed");
+} // Initialize
 
-void ShowProgress()
-  { if (LinesOut >= LinesBetweenHeaders)
-      { // show header
-        Serial.println("\tXAccel\t\t\tYAccel\t\t\t\tZAccel\t\t\tXGyro\t\t\tYGyro\t\t\tZGyro");
-        LinesOut = 0;
-      } // show header
-    Serial.print(BLANK);
-    for (int i = iAx; i <= iGz; i++)
-      { Serial.print(LBRACKET);
-        Serial.print(LowOffset[i]),
-        Serial.print(COMMA);
-        Serial.print(HighOffset[i]);
-        Serial.print("] --> [");
-        Serial.print(LowValue[i]);
-        Serial.print(COMMA);
-        Serial.print(HighValue[i]);
-        if (i == iGz)
-          { Serial.println(RBRACKET); }
-        else
-          { Serial.print("]\t"); }
-      }
-    LinesOut++;
+void SetOffsets(int TheOffsets[6]) {
+	accelgyro.setXAccelOffset(TheOffsets [iAx]);
+	accelgyro.setYAccelOffset(TheOffsets [iAy]);
+	accelgyro.setZAccelOffset(TheOffsets [iAz]);
+	accelgyro.setXGyroOffset (TheOffsets [iGx]);
+	accelgyro.setYGyroOffset (TheOffsets [iGy]);
+	accelgyro.setZGyroOffset (TheOffsets [iGz]);
+} // SetOffsets
+
+void ShowProgress() {
+	if (LinesOut >= LinesBetweenHeaders) { // show header
+		Serial.println("\tXAccel\t\t\tYAccel\t\t\t\tZAccel\t\t\tXGyro\t\t\tYGyro\t\t\tZGyro");
+		LinesOut = 0;
+	} // show header
+	Serial.print(BLANK);
+
+	for (int i = iAx; i <= iGz; i++) {
+		Serial.print(LBRACKET);
+		Serial.print(LowOffset[i]),
+		Serial.print(COMMA);
+		Serial.print(HighOffset[i]);
+		Serial.print("] --> [");
+		Serial.print(LowValue[i]);
+		Serial.print(COMMA);
+		Serial.print(HighValue[i]);
+		if (i == iGz) {
+			Serial.println(RBRACKET);
+		} else {
+			Serial.print("]\t");
+		}
+	}
+	LinesOut++;
   } // ShowProgress
 
-void PullBracketsIn()
-  { boolean AllBracketsNarrow;
-    boolean StillWorking;
-    int NewOffset[6];
+void PullBracketsIn() {
+	boolean AllBracketsNarrow;
+	boolean StillWorking;
+	int NewOffset[6];
   
-    Serial.println("\nclosing in:");
-    AllBracketsNarrow = false;
-    ForceHeader();
-    StillWorking = true;
-    while (StillWorking) 
-      { StillWorking = false;
-        if (AllBracketsNarrow && (N == NFast))
-          { SetAveraging(NSlow); }
-        else
-          { AllBracketsNarrow = true; }// tentative
-        for (int i = iAx; i <= iGz; i++)
-          { if (HighOffset[i] <= (LowOffset[i]+1))
-              { NewOffset[i] = LowOffset[i]; }
-            else
-              { // binary search
-                StillWorking = true;
-                NewOffset[i] = (LowOffset[i] + HighOffset[i]) / 2;
-                if (HighOffset[i] > (LowOffset[i] + 10))
-                  { AllBracketsNarrow = false; }
-              } // binary search
-          }
-        SetOffsets(NewOffset);
-        GetSmoothed();
-        for (int i = iAx; i <= iGz; i++)
-          { // closing in
-            if (Smoothed[i] > Target[i])
-              { // use lower half
-                HighOffset[i] = NewOffset[i];
-                HighValue[i] = Smoothed[i];
-              } // use lower half
-            else
-              { // use upper half
-                LowOffset[i] = NewOffset[i];
-                LowValue[i] = Smoothed[i];
-              } // use upper half
-          } // closing in
-        ShowProgress();
-      } // still working
-   
-  } // PullBracketsIn
+	Serial.println("\nclosing in:");
+	AllBracketsNarrow = false;
+	ForceHeader();  // LinesOut = 99;
+	StillWorking = true;
 
-void PullBracketsOut()
-  { boolean Done = false;
-    int NextLowOffset[6];
-    int NextHighOffset[6];
+	while (StillWorking == true) {
+		StillWorking = false;
+		
+		if (AllBracketsNarrow && (N == NFast)) {
+			SetAveraging(NSlow);
+		} else {
+			AllBracketsNarrow = true;
+		}// tentative
 
-    Serial.println("expanding:");
-    ForceHeader();
- 
-    while (!Done)
-      { Done = true;
-        SetOffsets(LowOffset);
-        GetSmoothed();
-        for (int i = iAx; i <= iGz; i++)
-          { // got low values
-            LowValue[i] = Smoothed[i];
-            if (LowValue[i] >= Target[i])
-              { Done = false;
-                NextLowOffset[i] = LowOffset[i] - 1000;
-              }
-            else
-              { NextLowOffset[i] = LowOffset[i]; }
-          } // got low values
-      
-        SetOffsets(HighOffset);
-        GetSmoothed();
-        for (int i = iAx; i <= iGz; i++)
-          { // got high values
-            HighValue[i] = Smoothed[i];
-            if (HighValue[i] <= Target[i])
-              { Done = false;
-                NextHighOffset[i] = HighOffset[i] + 1000;
-              }
-            else
-              { NextHighOffset[i] = HighOffset[i]; }
-          } // got high values
-        ShowProgress();
-        for (int i = iAx; i <= iGz; i++)
-          { LowOffset[i] = NextLowOffset[i];   // had to wait until ShowProgress done
-            HighOffset[i] = NextHighOffset[i]; // ..
-          }
-     } // keep going
-  } // PullBracketsOut
+		for (int i = iAx; i <= iGz; i++) {
+			if (HighOffset[i] <= (LowOffset[i]+1)) {
+				NewOffset[i] = LowOffset[i];
+			} else { // binary search
+				StillWorking = true;
+				NewOffset[i] = (LowOffset[i] + HighOffset[i]) / 2;
+				if (HighOffset[i] > (LowOffset[i] + 10)) {
+					AllBracketsNarrow = false;
+				}
+			} // binary search
+		}
 
-void SetAveraging(int NewN)
-  { N = NewN;
-    Serial.print("averaging ");
-    Serial.print(N);
-    Serial.println(" readings each time");
-   } // SetAveraging
+		SetOffsets(NewOffset);
+		ReadImuAvg();
+		for (int i = iAx; i <= iGz; i++) { // closing in
+			if (Smoothed[i] > Target[i]) { // use lower half
+				HighOffset[i] = NewOffset[i];
+				HighValue[i] = Smoothed[i];
+			} else {
+				LowOffset[i] = NewOffset[i];
+				LowValue[i] = Smoothed[i];
+			} // use upper half
+		} // closing in
+		ShowProgress();
+	} // still working   
+} // PullBracketsIn
+
+void PullBracketsOut() {
+	boolean Done = false;
+	int NextLowOffset[6];
+	int NextHighOffset[6];
+
+	Serial.println("expanding:");
+	ForceHeader();  // LinesOut = 99;
+
+	while (Done == false) {
+		Done = true;
+
+		SetOffsets(LowOffset);
+		ReadImuAvg(); // populate `Smoothed` array
+
+		for (int i = iAx; i <= iGz; i++) { // got low values
+			LowValue[i] = Smoothed[i];
+			if (LowValue[i] >= Target[i]) {
+				Done = false;
+				NextLowOffset[i] = LowOffset[i] - 1000;
+			} else {
+				NextLowOffset[i] = LowOffset[i];
+			}
+		} // got low values
+
+		SetOffsets(HighOffset);
+		ReadImuAvg();
+
+		for (int i = iAx; i <= iGz; i++) { // got high values
+			HighValue[i] = Smoothed[i];
+			if (HighValue[i] <= Target[i]) {
+				Done = false;
+				NextHighOffset[i] = HighOffset[i] + 1000;
+			} else {
+				NextHighOffset[i] = HighOffset[i];
+			}
+		} // got high values
+
+		ShowProgress();
+		for (int i = iAx; i <= iGz; i++) {
+			LowOffset[i] = NextLowOffset[i]; // had to wait until ShowProgress done
+			HighOffset[i] = NextHighOffset[i]; // ..
+		}
+	} // keep going
+}
+
+void SetAveraging(int NewN) {
+	N = NewN;
+	Serial.print("averaging "); Serial.print(N);
+	Serial.println(" readings each time");
+}
+
 
 void setup() {
+	// // Configure Timer 2 to replace Timer 0.
+	// TIMSK0 &= ~(1 << TOIE0); // disable overflow interrupt for timer0
+	// TCCR2A = _BV(COM2A1) | _BV(COM2B1) | _BV(WGM21) | _BV(WGM20); //outputs, fast PWM with TOP = 0xff
+	// TCCR2B = _BV(CS22);   // clock at F_CPU / 64
+	// TIMSK2 |= (1 << TOIE2); // enable overflow interrupt for timer2
 
-  // Configure Timer 2 to replace Timer 0.
-  TIMSK0 &= ~(1 << TOIE0); // disable overflow interrupt for timer0
-  TCCR2A = _BV(COM2A1) | _BV(COM2B1) | _BV(WGM21) | _BV(WGM20); //outputs, fast PWM with TOP = 0xff
-  TCCR2B = _BV(CS22);   // clock at F_CPU / 64
-  TIMSK2 |= (1 << TOIE2); // enable overflow interrupt for timer2
+	Initialize();
 
-  Initialize();
-    for (int i = iAx; i <= iGz; i++)
-      { // set targets and initial guesses
-        Target[i] = 0; // must fix for ZAccel 
-        HighOffset[i] = 0;
-        LowOffset[i] = 0;
-      } // set targets and initial guesses
-    Target[iAz] = 16384;
-    SetAveraging(NFast);
-    
-    PullBracketsOut();
-    PullBracketsIn();
-    
-  Serial.println((float)accelgyro.getTemperature() / 340.0 + 36.53);
-    Serial.println("-------------- done --------------");
-  } // setup
+	for (int i = iAx; i <= iGz; i++) { // set targets and initial guesses
+	  Target[i] = 0; // must fix for ZAccel 
+	  HighOffset[i] = 0;
+	  LowOffset[i] = 0;
+	}
+	Target[iAz] = 16384;
+
+	SetAveraging(NFast);
+
+	PullBracketsOut();
+	PullBracketsIn();
+
+	#if defined(IMU_MPU6050)
+	  Serial.print("Temp: ");
+	  Serial.print((float)accelgyro.getTemperature() / 340.0 + 36.53);
+	  Serial.print(", "); Serial.println((uint16_t)accelgyro.getTemperature());
+	#elif defined(IMU_MPU925X)
+	  uint16_t temperatureRaw = 0;
+	  accelgyro.getTemperatureRaw(&temperatureRaw);
+
+	  float temperature = 0.0f;
+	  accelgyro.getTemperature(&temperature);
+
+	  Serial.print("Temp: "); Serial.print(temperature);
+	  Serial.print(", "); Serial.println(temperatureRaw);
+	#endif
+
+	Serial.println("-------------- done --------------");
+} // setup
  
-void loop()
-  {
-  } // loop
+void loop() {}

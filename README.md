@@ -6,10 +6,10 @@ The project implements the complete flight controller firmware, including attitu
 
 ![8bit-quad](gallery/20180330_013913.webp)
 
-This is the earliest surviving revision (May 2018): a working nRF24L01+-linked
-flight controller and matching remote transmitter, running on the custom
-"8bit-quad" ATmega328 board pair. It flies in `acro` and `stabilize`
-(angle-hold) modes.
+This revision (2021-03) is a rebrand/cleanup pass on top of the earliest
+surviving version: a working nRF24L01+-linked flight controller and matching
+remote transmitter, running on the custom "8bit-quad" ATmega328 board pair.
+It flies in `acro` and `stabilize` (angle-hold) modes.
 
 ## Features
 
@@ -37,9 +37,9 @@ flight controller and matching remote transmitter, running on the custom
 ### Remote controller
 
 Custom ATmega328 transmitter board, nRF24L01+ radio, serial command interface
-for configuration over USB/UART. This is 2018 code, written alongside this
-revision and never modified afterwards; it shares the wire protocol
-byte-for-byte (see `doc/changelog.md`).
+for configuration over USB/UART. This is 2018 code, written alongside the
+first flight controller revision and never modified afterwards; it shares the
+wire protocol byte-for-byte (see `doc/changelog.md`).
 
 ## Flight controller implementation
 
@@ -64,12 +64,11 @@ indication LEDs) each run on their own sub-cycle instead of every iteration.
 - **Communication**: nRF24L01+ packets (`Command`/`Setting`/`Telemetry*`)
   drained once per outer cycle; a link timeout zeroes the stick inputs and
   disarms.
-- **Altitude**: BMP280 pressure → relative altitude, and a vertical-speed PID
-  exists in code, but nothing in this revision's command handling actually
-  engages it - it's dead weight here, not a working feature yet.
+- **Altitude**: BMP280 pressure → relative altitude, reported over telemetry.
+  No altitude-hold in this revision (see `doc/changelog.md`).
 
-This is the first revision in the reconstructed history, so there's no
-previous revision to compare against.
+This revision reorganizes and retunes the previous one rather than adding
+major features - see `doc/changelog.md` for the detailed changes.
 
 ## Development environment
 

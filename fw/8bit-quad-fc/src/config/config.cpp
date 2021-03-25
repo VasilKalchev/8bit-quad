@@ -46,31 +46,30 @@ EepromSetting<int8_t> type(SettingId::commTelemetry_type, 1, 105, 1, 4, 1);
 } //namespace telemetry
 } //namespace communication
 
-namespace regulation {
-namespace inner {
+namespace ctlr {
+namespace att {
+namespace rate {
 EepromSetting<float> P(SettingId::regInner_p, 0.15, 110, 0.1, 0.7, 0.025);
 EepromSetting<float> yawP(SettingId::regInner_yawP, 0.8, 115, 0.1, 1.0, 0.025);
-const float yawI = 0.03f;
+const float yawI = 0.05f; // was 0.03
+const uint32_t yaw_updateRate = 3100;
 const int16_t outputLimit = 70;
 // EepromSetting<int16_t> outputLimit(SettingId::regInner_outputLimit, 70, 120, 10, 127, 1);
-} //namespace inner
-namespace outer {
+} // namespace rate
+namespace angle {
 EepromSetting<float> P(SettingId::regOuter_p, 2.3, 125, 1.5, 3.3, 0.025);
 EepromSetting<float> I(SettingId::regOuter_i, 0.5, 130, 0.0, 1.8, 0.025);
 const uint32_t updateRate = 12406;
 // EepromSetting<uint32_t> updateRate(SettingId::regOuter_updateRate, 13750, 135, 2000, 30000, 500);
 const int16_t outputLimit = 250;
 // EepromSetting<int16_t> outputLimit(SettingId::regOuter_outputLimit, 250, 140, 10, 250, 1);
-} //namespace outer
+} // namespace angle
+} // namespace att
 const uint8_t minimumRegulationThrottle = 3;
 const uint8_t maximumBaseThrottle = 120;
 // EepromSetting<uint8_t> minimumRegulationThrottle(SettingId::reg_minRegThrottle, 2, 145, 0, 15, 1);
 // EepromSetting<uint8_t> maximumBaseThrottle(SettingId::reg_maxBaseThrottle, 117, 150, 90, 127, 1);
-namespace altitude {
-EepromSetting<float> P(SettingId::regAlt_p, 0.5, 155, 0.0, 2, 0.1);
-EepromSetting<float> D(SettingId::regAlt_d, 0.2, 160, 0.0, 2, 0.1);
-} //namespace altitude
-} //namespace regulation
+} //namespace ctlr
 
 namespace indication {
 const uint32_t period = 200000;
@@ -80,7 +79,7 @@ EepromSetting<bool> lamp(SettingId::indication_lamp, false, 160, 0, 1);
 
 namespace battery {
 const uint32_t updateRate = 500000;
-const float alpha = 0.98;
+const float alpha = 0.7; // was 0.98
 const float lowVoltage = 11.1;
 const float criticalVoltage = 10.0f;
 } //namespace battery
@@ -103,17 +102,15 @@ void init() {
   // communication::crcLength.init();
   communication::telemetry::type.init();
 
-  regulation::inner::P.init();
-  regulation::inner::yawP.init();
-  // regulation::inner::outputLimit.init();
-  regulation::outer::P.init();
-  regulation::outer::I.init();
-  // regulation::outer::updateRate.init();
-  // regulation::outer::outputLimit.init();
-  // regulation::minimumRegulationThrottle.init();
-  // regulation::maximumBaseThrottle.init();
-  regulation::altitude::P.init();
-  regulation::altitude::D.init();
+  ctlr::att::rate::P.init();
+  ctlr::att::rate::yawP.init();
+  // ctlr::att::rate::outputLimit.init();
+  ctlr::att::angle::P.init();
+  ctlr::att::angle::I.init();
+  // ctlr::att::angle::updateRate.init();
+  // ctlr::att::angle::outputLimit.init();
+  // ctlr::minimumRegulationThrottle.init();
+  // ctlr::maximumBaseThrottle.init();
 
   indication::armsLevel.init();
   indication::lamp.init();

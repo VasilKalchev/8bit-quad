@@ -1,5 +1,7 @@
 #include "8bit-quad-fc_board.hpp"
 
+#include "../peripheral/ADC.hpp"
+
 
 void initIO() {
   // Set motors PWM to 0

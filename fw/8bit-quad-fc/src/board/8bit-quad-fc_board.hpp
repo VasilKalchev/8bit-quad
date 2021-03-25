@@ -4,8 +4,6 @@
 #include <avr/io.h>
 #include <Arduino.h>
 
-#include "../peripheral/ADC.hpp"
-
 
 namespace pin {
 

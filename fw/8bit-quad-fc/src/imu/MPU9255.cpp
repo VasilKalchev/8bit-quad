@@ -7,21 +7,23 @@ bool MPU9255::initialize() {
   bool s = true;
   _mpu9255.initialize();
   for (auto i = 0; i < 3; ++i) {
-    s &= _mpu9255.setAccelDLPF(2);
+    s &= _mpu9255.setAccelDLPF(4);
     s &= _mpu9255.setAccelFullScaleRange(1);
-    s &= _mpu9255.setGyroDLPF(2);
+    s &= _mpu9255.setGyroDLPF(0);
     s &= _mpu9255.setGyroFullScaleRange(1);
-    _mpu9255.setXAccelOffset(2584);
-    _mpu9255.setYAccelOffset(-2490);
-    _mpu9255.setZAccelOffset(5221);
-    _mpu9255.setXGyroOffset (5);
-    _mpu9255.setYGyroOffset (-6);
-    _mpu9255.setZGyroOffset (8);
+    _mpu9255.setXAccelOffset(2606);
+    _mpu9255.setYAccelOffset(-2476);
+    _mpu9255.setZAccelOffset(6251);
+    _mpu9255.setXGyroOffset (25);
+    _mpu9255.setYGyroOffset (-3);
+    _mpu9255.setZGyroOffset (64);
   }
   s &= _mpu9255.testConnection();
   return s;
 }
 
+// Returns: 0 - ok, 1 - zero read (sensor likely not ready yet),
+// 2 - I2C failure (read did not complete).
 void MPU9255::getMotion(AngularVelocity* angularVelocity, Acceleration* acceleration) {
   int16_t xg = 0, yg = 0, zg = 0;
   Acceleration accelTemp;
