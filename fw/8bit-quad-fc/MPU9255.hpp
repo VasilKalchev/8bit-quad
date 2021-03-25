@@ -1,9 +1,9 @@
 #pragma once
 #include <inttypes.h>
 
-#include "Wire.h"
+#include <Wire.h>
 #include <MPU925x_I2C.hpp>
-#include "../common/imu_types.hpp"
+#include "IMU.hpp"
 
 
 class MPU9255 {

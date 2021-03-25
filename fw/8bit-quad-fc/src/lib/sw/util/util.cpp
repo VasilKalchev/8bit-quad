@@ -1,4 +1,4 @@
-#include "utils.hpp"
+#include "util.hpp"
 
 
 const float toDegrees = 57.29577951308232087679815481410517033240547246656432154916;
@@ -38,6 +38,6 @@ float middle_of_3(float a, float b, float c) {
 	} else {
 		middle = (a <= b) ? a : b;
 	}
-
+	
 	return middle;
 }

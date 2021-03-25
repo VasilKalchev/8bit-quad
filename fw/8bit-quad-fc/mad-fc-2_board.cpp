@@ -1,6 +1,6 @@
-#include "8bit-quad-fc_board.hpp"
+#include "mad-fc-2_board.hpp"
 
-#include "../peripheral/ADC.hpp"
+#include "src/lib/hw/m328/ADC/ADC.hpp"
 
 
 void initIO() {

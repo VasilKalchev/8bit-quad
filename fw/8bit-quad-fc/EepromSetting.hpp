@@ -1,7 +1,7 @@
 #pragma once
 
 // #include <avr/eeprom.h>
-#include "../peripheral/eeprom.hpp"
+#include "eeprom.hpp"
 #include <Arduino.h>
 
 #include "config.hpp"

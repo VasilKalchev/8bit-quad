@@ -1,7 +1,7 @@
 #pragma once
 #include <inttypes.h>
 
-#include "imu_types.hpp"
+#include "IMU.hpp"
 
 
 enum class Role : uint8_t {

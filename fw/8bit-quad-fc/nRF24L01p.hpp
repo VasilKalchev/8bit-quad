@@ -3,7 +3,7 @@
 
 #include <SPI.h>
 #include "RF24.h"
-#include "../common/comm_packets.hpp"
+#include "Communication.hpp"
 
 // const uint64_t _pipe[5] = { 0x3A3A3A3AD2LL, 0x3A3A3A3AC3LL, 0x3A3A3A3AB4LL, 0x3A3A3A3AA5LL, 0x3A3A3A3A96LL };
 const uint64_t _pipe[] = { 0x3A3A3A3AD2LL, 0x3A3A3A3AC3LL };

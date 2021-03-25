@@ -51,7 +51,7 @@ namespace att {
 namespace rate {
 EepromSetting<float> P(SettingId::regInner_p, 0.15, 110, 0.1, 0.7, 0.025);
 EepromSetting<float> yawP(SettingId::regInner_yawP, 0.8, 115, 0.1, 1.0, 0.025);
-const float yawI = 0.05f; // was 0.03
+const float yawI = 0.05f; // was 0.025
 const uint32_t yaw_updateRate = 3100;
 const int16_t outputLimit = 70;
 // EepromSetting<int16_t> outputLimit(SettingId::regInner_outputLimit, 70, 120, 10, 127, 1);
@@ -69,6 +69,10 @@ const uint8_t minimumRegulationThrottle = 3;
 const uint8_t maximumBaseThrottle = 120;
 // EepromSetting<uint8_t> minimumRegulationThrottle(SettingId::reg_minRegThrottle, 2, 145, 0, 15, 1);
 // EepromSetting<uint8_t> maximumBaseThrottle(SettingId::reg_maxBaseThrottle, 117, 150, 90, 127, 1);
+namespace elev {
+EepromSetting<float> P(SettingId::regAlt_p, 0.5, 155, 0.0, 2, 0.1);
+EepromSetting<float> D(SettingId::regAlt_d, 0.2, 160, 0.0, 2, 0.1);
+} //namespace elev
 } //namespace ctlr
 
 namespace indication {
@@ -79,7 +83,7 @@ EepromSetting<bool> lamp(SettingId::indication_lamp, false, 160, 0, 1);
 
 namespace battery {
 const uint32_t updateRate = 500000;
-const float alpha = 0.7; // was 0.98
+const float alpha = 0.7;
 const float lowVoltage = 11.1;
 const float criticalVoltage = 10.0f;
 } //namespace battery
@@ -111,6 +115,8 @@ void init() {
   // ctlr::att::angle::outputLimit.init();
   // ctlr::minimumRegulationThrottle.init();
   // ctlr::maximumBaseThrottle.init();
+  ctlr::elev::P.init();
+  ctlr::elev::D.init();
 
   indication::armsLevel.init();
   indication::lamp.init();

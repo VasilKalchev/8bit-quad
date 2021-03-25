@@ -21,10 +21,16 @@
 	MPU925x_I2C imu;
 #endif
 
+
 int16_t const target_output = 0;
 int16_t const target_output_az = 16384;
 
-int16_t offsets[6] = {2595, -2475, 6251, 28, -6, 67};
+// int16_t offsets[6] = {-5333, -6027, 1446, 51, -62, 10};
+int16_t offsets[6] = {-2606, -2476, 6251, 25, -3, 64};
+
+// [2606,2607] --> [-3,5] [-2480,-2479] --> [-4,3]  [6251,6252] --> [16384,16392]
+// [25,26] --> [0,2] [-3,-2] --> [0,1] [64,65] --> [0,2]
+// Temp: 17.60, 64400
 
 enum AxisNdx : uint8_t {
 	NDX_AX = 0, NDX_AY = 1, NDX_AZ = 2,
@@ -32,6 +38,7 @@ enum AxisNdx : uint8_t {
 };
 
 int16_t const avg_count = 300;
+
 
 void ReadImuAvg(int16_t * const ax, int16_t * const ay, int16_t * const az, 
 				int16_t * const gx, int16_t * const gy, int16_t * const gz) {
@@ -71,6 +78,7 @@ void SetOffsets(int16_t offsets[6]) {
 	imu.setYGyroOffset(offsets[NDX_GY]);
 	imu.setZGyroOffset(offsets[NDX_GZ]);
 }
+
 
 void setup() {
 	// join I2C bus (I2Cdev library doesn't do this automatically)
@@ -114,6 +122,7 @@ void loop() {
 	Serial.print(gz);
 	Serial.print("\n");
 
+
 	while (Serial.available() > 0) {
 		int8_t ndx = Serial.parseInt();
 		char direction_char = Serial.read();
@@ -126,6 +135,7 @@ void loop() {
 			}
 		}
 		SetOffsets(offsets);
+
 
 		#if defined(IMU_MPU6050)
 			int16_t tempRaw = imu.getTemperature();
