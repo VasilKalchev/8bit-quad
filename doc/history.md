@@ -27,20 +27,44 @@ archived snapshots are named and dated to match.
 
 ## Lineage
 
+```mermaid
+gitGraph
+   commit id: "nrf24-baseline" tag: "2018-05-04"
+   branch attempt/dmp-attitude
+   commit id: "MPU6050 DMP evaluation" tag: "2018-05-04"
+   checkout main
+   branch attempt/external-libs-rewrite
+   commit id: "board 2a, external libraries" tag: "2018-05-09"
+   checkout main
+   branch attempt/portable-hal-rewrite
+   commit id: "portable HAL skeleton" tag: "2021-03-17"
+   commit id: "hardware/portable/software split" tag: "2021-04-03"
+   checkout main
+   commit id: "board-rebrand" tag: "2021-03-25"
+   branch attempt/cycle-scheduler-blackbox
+   commit id: "cycle scheduler, SD black box" tag: "2021-03-25"
+   checkout main
+   commit id: "imu-read-status" tag: "2021-04-03"
 ```
-nrf24-baseline (2018-05-04, working)
-  ├─ attempt/external-libs-rewrite (2018-04-10 .. 05-09, abandoned)
-  └─ board-rebrand (2021-03-25, working)
-       ├─ attempt/portable-hal-rewrite (2021-03-15 .. 04-03, abandoned)
-       ├─ attempt/cycle-scheduler-blackbox (forked 2021-03-25, abandoned)
-       └─ imu-read-status (2021-04-03, working)
-            └─ ppm-rework (2021-12-20 .. 2022-04-03, working, flight-tuned)
-```
+
+`ppm-rework` (2021-12-20 to 2022-04-03) belongs on `main` after
+`imu-read-status` and is not committed yet.
 
 Only `nrf24-baseline` and `ppm-rework` are complete, working firmware.
 `board-rebrand` and `imu-read-status` are working stepping stones between
-them. The three `attempt/*` branches are rewrites that were abandoned before
-reaching a flyable state.
+them. The four `attempt/*` branches are rewrites and alternatives that were
+abandoned before reaching a flyable state; none of them build, and each is
+committed as found.
+
+Three of the branches hold work older than the commit they hang off, because
+no commit exists at the state they were written against.
+`attempt/external-libs-rewrite` forked from the mainline of around 2018-04-10,
+three and a half weeks before its parent's content.
+`attempt/portable-hal-rewrite` forked around 2021-03-18, after the IMU driver
+work but before the 2021-03-24 namespace rename, so it sits between the first
+two commits on `main` and is attached to the first. `attempt/dmp-attitude` is
+attached to `nrf24-baseline`, where the file was found parked, but its code is
+a fusion generation older than that commit.
 
 Work happened in three bursts with long gaps: 2018-01 to 2018-05, then nothing
 for almost three years, 2021-03 to 2021-04, then eight months of nothing, and
@@ -96,8 +120,18 @@ The split matters beyond resolution: 2021-03-25 is the exact state
 `attempt/cycle-scheduler-blackbox` forked from, and it is the closest
 committed parent for `attempt/portable-hal-rewrite`.
 
-## Branches (abandoned rewrite attempts, not merged into `main`)
+## Branches (abandoned attempts, not merged into `main`)
 
+- **`attempt/dmp-attitude` (before 2018-05-04)** - an evaluation of the
+  MPU6050's on-chip Digital Motion Processor as a replacement for filtering
+  attitude on the MCU. The DMP path is fully wired, but its output is only
+  printed alongside the complementary filter's for comparison, never fed to
+  the controller. Found parked in the baseline snapshot as a second sketch
+  with its extension changed so the IDE would ignore it, which is also why it
+  is committed at that snapshot's date: the code is a fusion generation older,
+  predating Mahony, and no better date survives. It does not compile against
+  its parent, because every `config::` declaration it needs had been commented
+  out by then.
 - **`attempt/external-libs-rewrite` (2018-04-10 .. 2018-05-09)** - a rewrite
   onto board revision "2a", with the drivers and shared types extracted into
   independently installed Arduino libraries (`MAD-DataTypes`, `MAD-Utils`,

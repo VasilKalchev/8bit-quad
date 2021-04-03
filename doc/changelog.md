@@ -112,25 +112,29 @@ firmware for the same reason.
   dynamically; the previous commit carries a 2018 copy of the same sketch.
   Added `trim-imu`, a bench sketch for dumping raw IMU readings (MPU6050 or
   MPU9255, selectable) to help manually trim offsets.
-- Not carried over from the source snapshot, alongside altitude-hold:
-  - The complementary-filter attitude estimator, an alternative to Mahony
-    behind `#if FUSION_COMPLEMENTARY_FILTER`. It could not be selected as
-    found: `config::imu::complementary::alpha`, `oneMinusAlpha` and
-    `config::imu::epsilon` are all commented out in the source's
-    `config.hpp`, so enabling it would not compile. `MAHONY_FUSION` is left
-    as the sole, always-true branch. The 2018 revision kept the same code
-    commented out in the sketch; the source restructured it into a live
-    `#if` here without restoring what it needs.
-  - The `ANGULAR_RATE_DIRECT_FROM_GYROSCOPE` /
-    `ANGULAR_RATE_DIFFERENTIATE_FROM_MAHONY` switch. The selected branch
-    (differentiate) is kept as plain code; the unselected one-line gyro read
-    and the switch itself are dropped.
-  - Six debug blocks that were live but switched off: `DEBUG_EEPROM`,
-    `BLACK_BOX_HOVER_VOLTAGE`, `PRINT_BATTERY_VOLTAGE`, `PRINT_THROTTLE`,
-    `DEBUG_ANGLE_CTRL_PERIOD`, `DEBUG_RATE_CTRL_PERIOD`.
-  - `DEBUG_PIN` and the four `DBG_PIN_*` defines, which the source defines
-    but never references anywhere in the sketch.
-- The yaw rate's `dt` is `uint32_t` here, matching the source. At a 3100 us
-  cycle it truncates to zero and `avYaw` divides by zero. Kept rather than
-  quietly fixed: it is a regression against the 2018 revision, which used a
-  float, and the next revision is where it goes away.
+
+## 2021-04-03
+
+- `MPU9255::getMotion()` now returns a status code (0 ok, 1 zero-read, 2 I2C
+  failure) instead of `void`; `loop()` counts zero-reads and I2C failures
+  instead of silently ignoring them.
+- I2C clock forced back down to 400 kHz with a direct `TWBR = 12` after the
+  `Wire.setClock(800000)` call, which overrides it. The 800 kHz attempt did
+  not stick; the 2022 revision raises it again.
+- `MPU925x_I2C`: the read timeout is now measured with `micros()`
+  and set to 1000 us, instead of `millis()` and 11 ms. At a 3100 us cycle the
+  old value could stall the loop for three cycles on one bad read, which is
+  the failure this revision's read-status reporting exists to catch. This is
+  a local edit to the vendored library, found in the snapshot and never
+  committed upstream, so it no longer matches the pinned `15e9013`.
+- Recalibrated the accelerometer and gyro offsets.
+- `yawI` 0.05 -> 0.04.
+- The rest of this window's changes in the source are altitude-hold being
+  commented out and a compile-time IMU selection macro being added, neither of
+  which is carried into this repository.
+- Yaw rate is now read straight from the gyro (`avYaw = angularVelocity.z`)
+  instead of being differentiated from the fused yaw angle, which also
+  removes the previous revision's `uint32_t` dt and its division by zero.
+  The source kept differentiating until the 2022 revision, where it made the
+  same change; brought forward here rather than carrying a broken yaw rate
+  through another revision.

@@ -51,7 +51,7 @@ namespace att {
 namespace rate {
 EepromSetting<float> P(SettingId::regInner_p, 0.15, 110, 0.1, 0.7, 0.025);
 EepromSetting<float> yawP(SettingId::regInner_yawP, 0.8, 115, 0.1, 1.0, 0.025);
-const float yawI = 0.05f; // was 0.03
+const float yawI = 0.04f; // was 0.03
 const uint32_t yaw_updateRate = 3100;
 const int16_t outputLimit = 70;
 // EepromSetting<int16_t> outputLimit(SettingId::regInner_outputLimit, 70, 120, 10, 127, 1);

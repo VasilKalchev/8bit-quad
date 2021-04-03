@@ -59,17 +59,17 @@ bool I2C::readByte(uint8_t slaveAddress, uint8_t registerAddress, uint8_t* data)
 }
 
 uint8_t I2C::readBytes(uint8_t slaveAddress, uint8_t registerAddress, uint8_t* data, uint8_t length) {
-  uint32_t startTime = millis();
+  uint32_t startTime = micros();
   if (length > 31) return 0;
   Wire.beginTransmission(slaveAddress);
   Wire.write(registerAddress);
   Wire.endTransmission();
   Wire.requestFrom(slaveAddress, length);
   uint8_t i = 0;
-  while (Wire.available() && (millis() < startTime + _timeout)) {
+  while (Wire.available() && (micros() < startTime + _timeout)) {
     data[i++] = Wire.read();
   }
-  if (millis() > startTime + _timeout && i < length) i = 0;
+  if (micros() > startTime + _timeout && i < length) i = 0;
   return i;
 }
 
@@ -92,4 +92,4 @@ bool I2C::setTimeout(uint32_t timeout) {
   return true;
 }
 
-uint32_t I2C::_timeout = 11; // 80
+uint32_t I2C::_timeout = 1000; // usec

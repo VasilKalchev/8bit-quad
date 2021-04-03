@@ -11,7 +11,7 @@ public:
   MPU9255(uint8_t address = 0x73);
 
   bool initialize();
-  void getMotion(AngularVelocity* angularVelocity, Acceleration* acceleration);
+  uint8_t getMotion(AngularVelocity* angularVelocity, Acceleration* acceleration);
   float getTemperature();
 
   MPU925x_I2C _mpu9255;

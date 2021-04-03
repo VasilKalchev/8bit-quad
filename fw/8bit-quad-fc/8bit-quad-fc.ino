@@ -99,7 +99,10 @@ void setup() {
   indication::arms(OFF);
 
   Wire.begin();
+  // TODO: measure maximal I2C time and set timeout in I2C helper lib.
+  // 14 byte read: 308us @ 800kHz, bad SCL signal
   Wire.setClock(800000); // was 400000
+  TWBR = 12; // 400 kHz (maximum)
 
   INIT_UART(config::debug::baud);
   uart::initialize(config::debug::baud);
@@ -272,7 +275,16 @@ void loop() {
 
   // Attitude -----
   // Fetch
-  imu::mpu9255.getMotion(&angularVelocity, &acceleration);
+  uint8_t imuStatus = imu::mpu9255.getMotion(&angularVelocity, &acceleration);
+  static uint32_t imuZeroReads = 0;
+  static uint32_t imuReadFailures = 0;
+  if (imuStatus == 1) {
+    ++imuZeroReads;
+    DEBUG("IMU zero read: "); DEBUGLN(imuZeroReads);
+  } else if (imuStatus == 2) {
+    ++imuReadFailures;
+    DEBUG("IMU I2C fail: "); DEBUGLN(imuReadFailures);
+  }
 
 
 #if DEBUG_ANGULAR_VELOCITY
@@ -302,15 +314,7 @@ void loop() {
                 angularVelocity.x * DEG_TO_RAD, angularVelocity.y * DEG_TO_RAD, angularVelocity.z * DEG_TO_RAD);
   attitude.roll = mahonyPitch * RAD_TO_DEG;
   attitude.pitch = mahonyRoll * RAD_TO_DEG;
-  float mYaw = mahonyYaw * RAD_TO_DEG;
-
-  static uint32_t dVelocityLUS = microsThisCycle;
-  static float attitudeYawLast = mYaw;
-  uint32_t us = micros();
-  uint32_t vDt = (us - dVelocityLUS + 4) / 1000000.0f;
-  avYaw = (mYaw - attitudeYawLast) / vDt;
-  attitudeYawLast = mYaw;
-  dVelocityLUS = us;
+  avYaw = angularVelocity.z;
 #endif
 
 

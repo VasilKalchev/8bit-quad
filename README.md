@@ -6,7 +6,7 @@ The project implements the complete flight controller firmware, including attitu
 
 ![8bit-quad](gallery/20180330_013913.webp)
 
-This revision (2021-03) is a rebrand/cleanup pass on top of the earliest
+This revision (2021-04) is a rebrand/cleanup pass on top of the earliest
 surviving version: a working nRF24L01+-linked flight controller and matching
 remote transmitter, running on the custom "8bit-quad" ATmega328 board pair.
 It flies in `acro` and `stabilize` (angle-hold) modes.
@@ -53,7 +53,7 @@ indication LEDs) each run on their own sub-cycle instead of every iteration.
 - **Sensor fusion**: Mahony filter (gyro + accel only, no magnetometer),
   producing a quaternion converted to pitch/roll/yaw.
 - **Attitude representation**: Euler pitch/roll from the fusion output; yaw
-  rate obtained by differentiating the fused yaw angle.
+  rate taken directly from the gyro.
 - **Stabilization**: cascaded PID - an outer angle loop (pitch/roll) feeds
   setpoints to an inner rate loop (pitch/roll/yaw), which drives the motor
   mix. `acro` mode drives the rate loop directly from the sticks, skipping
@@ -111,12 +111,6 @@ arduino-cli compile --profile rc
 
 fetches exactly that core and builds against it with nothing installed
 beforehand.
-
-Core `1.0.0` is the nearest published core to this revision rather than an
-exact match: it carries the `MPU925x_I2C` 1000 us read timeout that this
-revision predates, so `fc` builds 42 bytes smaller than it does against the
-core in this repository. For a build identical to this revision, use the
-manual route below.
 
 **Manual:**
 
