@@ -1,3 +1,47 @@
+/* List of abbreviations:
+ * ctl - control
+ * ctlr - controller
+ * meas - measurement
+ * sp - setpoint
+ * pv - process variable
+ * op - output
+
+ * thrl - throttle
+
+ * att - attitude (orientation)
+ * elev - elevation (altitude)
+ * pos - position
+ * nav - navigation
+
+ * vert - vertical
+ * horiz - horizontal
+
+ * usec - microsecond
+ * msec - millisecond
+
+ * rel - relative
+ * abs - absolute
+
+ * acclrm - accelerometer
+ * accel - acceleration
+ * gyro - gyroscope
+ * ang_rate - angular rate/velocity
+ * imu - inertial measurement unit
+ * bps - barometric pressure sensor
+
+ * mmps - millimeters/s
+ * mps - meters/s
+
+ * temp - temperature
+ * tmp - temporary
+
+ * btry - battery
+
+ * cfg - configuration
+ * comm - communication
+ */
+
+
 #include "config.hpp"
 
 #include "src/portable/include.hpp"
@@ -6,16 +50,32 @@ using namespace portable;
 
 #define BLOCK_FOR(time_usec, to_usec) while ((Usec() - time_usec) < to_usec); time_usec = Usec()
 
+int main(void) {
+	init();
+	initVariant();
+
+	setup();
+
+	for (;;) {
+		loop();
+		if (serialEventRun) serialEventRun();
+	}
+
+	return 0;
+}
 
 void setup() {
 	clk::Init();
-	pwr::Init();
+	gpio::Init();
+	pwm::Init();
+	tmr::Init();
 
 	PRINT_INIT(config::uart_baud_rate);
 	PRINT_INFO(F("\nRESET -----\n\n--- Flight controller ---\n"));
 	PRINT_VERBOSE(F("SysClk: ")); PRINT_VERBOSE(F_CPU); PRINT_VERBOSE(F("\n"));
 
-	gpio::Init();
+	imu::Init();
+	bps::Init();
 
 	rf::Init();
 	// while (rf::Init() != true) {
@@ -24,18 +84,52 @@ void setup() {
 	// }
 	// gpio::Low(&gpio::signal);
 
-	tmr::Init();
-
 	adc::Init();
 	adc::SelectChannel(static_cast<adc::channel_t>(config::analog::first_channel));
+
+	fusion::attitude::Init();
+
+	ctrl::angular_rate::pitch::Init();
+	ctrl::angular_rate::roll::Init();
+	ctrl::angular_rate::yaw::Init();
+
+	ctrl::attitude::pitch::Init();
+	ctrl::attitude::roll::Init();
+
+	// ctrl::vert_accel::Init();
+	// ctrl::vert_rate::Init();
+	// ctrl::vert_pos::Init();
+
+
+	// -----
+
+
 
 	PRINT_VERBOSE(F("setup done\n"));
 }
 
 
 void loop() {
-	static uint32_t usec_cycle = Usec();
-	usec_cycle = Usec();
+	/* TODO:
+	 * Log errors to EEPROM (fail to achieve timing...).
+	 * Log statistics to EEPROM.
+	 *
+	 * Integration test with serial output.
+	 * Measure timing by buffering them and printing them in the end.
+	 * Sync cycle to motor timers directly, instead of usec function.
+	 *
+	 * Pass radians in mahony.
+	 *
+	 * Enable/disable block and check if combination is compatible.
+	 *
+	 * Remote control shaping and FF.
+	 * Angle P with FF, Rate PID.
+	 * 
+	 * Detect overflows.
+	 */
+
+	static uint32_t usec_cycle = tmr::Usec();
+	usec_cycle = tmr::Usec();
 
 	static uint32_t cycle = 0;
 
@@ -44,11 +138,6 @@ void loop() {
 
 	#endif
 
-	/* TODO:
-	 * Maybe keep different blocks in different files.
-	 * Integration test with serial output.
-	 * Accel median filter.
-	 */
 
 	/* Remote control
 	 * --------------
@@ -59,25 +148,45 @@ void loop() {
 	 * priority: exclusive
 	 * flight modes: 'Acro', 'Angle'
 	 */
+	static uint32_t last_packet_time_usec = usec_cycle;
 	if (!cycle % 1) { // todo
 		static uint32_t remote_control_time_usec = usec_cycle;
 		BLOCK_FOR(remote_control_time_usec, config::cycle_period_usec);
 
 		TIME_REMOTE_CONTROL_BEGIN();
-		if (rc::IsAvailable()) {
-			uint8_t message_raw[message_size];
-			rc::Read(&message_raw, message_size);
+		if (rf::IsAvailable()) {
 
-			switch (message_raw[0]) {
-				case MessageType::Control:
+			do {
+				uint8_t const packet_size = rf::GetPacketSize();
+				uint8_t packet_raw[packet_size];
+
+				rf::Read(&packet_raw, packet_size);
+			} while (rf::IsAvailable());
+
+			switch (packet_raw[rf::ndx::packet_type]) {
+				case rf::packet::type::Control: {
+					rf::packet::Control packet_control;
+					memcpy(&packet_control, &packet_raw, packet_size);
+
+					rf::ProcessControlPacket(&)
+
+					last_packet_time_usec = usec_cycle;
+				}
 				break;
-				case MessageType::Config:
+				case rf::packet::type::Config: {
+					rf::packet::Config packet_config;
+					memcpy(&packet_config, &packet_raw, packet_size);
+
+					last_packet_time_usec = usec_cycle;
+				}
 				break;
-				default:
+				default: {
+					rf::Reset();
+				}
 				break;
 			}
 
-		} // if (rc::IsAvailable())
+		} // if (rf::IsAvailable())
 		TIME_REMOTE_CONTROL_END();
 
 		#if PRINT_REMOTE_CONTROL == true
@@ -85,8 +194,8 @@ void loop() {
 	}
 
 
-	/* Remote control transformation
-	 * -----------------------------
+	/* Remote control shaping
+	 * ----------------------
 	 * input: RC state
 	 * output: control
 	 * cycles: * * _
@@ -95,7 +204,21 @@ void loop() {
 	 * flight modes: 'Acro', 'Angle'
 	 */
 	if (!cycle % 1) {
+		// convert RC state to controllers input depending on mode
+		// Angle: -512..+512 to -35..+35
+		// Angular rate: -512..+512 to -90..+90
+		// Yaw angular rate: -512..+512 to -90..+90
+		// Throttle: 0..1023 to 0..127
+		// Vertical speed: 0..1023 to -4..+4
+		// FN1: set flight mode
+		// FNx: en/dis flight add-ons (alt hold, air mode...)
+		// FNy: change input ranges
+		// FNz: change indication
+		if (flight_mode_g == FlighMode::Acro) {
 
+		} else if (flight_mode_g == FlighMode::Stab) {
+
+		}
 		#if PRINT_RC_TRANSFORMATION == true
 		#endif
 	}
