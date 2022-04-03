@@ -73,12 +73,8 @@ and so on.
 ===============================================
 */
 
-// #define IMU_MPU6050
-#define IMU_MPU925X
-
-// I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
-// for both classes must be in the include path of your project
-#include "I2Cdev.h"
+#define IMU_MPU6050
+// #define IMU_MPU925X
 
 #if defined(IMU_MPU6050)
   #include <MPU6050.h>

@@ -116,8 +116,12 @@ void print(const char string[]) {
   }
 }
 
+bool available() {
+  return (UCSR0A & (1 << RXC0));
+}
+
 uint8_t read() {
-  while (!(UCSR0A & (1 << RXC0)));
+  // while (!(UCSR0A & (1 << RXC0)));
   return UDR0;
 }
 

@@ -1,118 +1,174 @@
 #include "config.hpp"
 
+#include <avr/eeprom.h>
 
-namespace config {
 
-namespace debug {
-const uint32_t baud = 2000000;
-} //namespace debug
+// #if FUSION_COMPLEMENTARY_FILTER == 0 && FUSION_MAHONY_FILTER == 0
+//   #error "No 'fusion method' specified!"
+// #endif
+
+// #if ANGULAR_RATE_DIRECT_FROM_GYROSCOPE == 0 && ANGULAR_RATE_DIFFERENTIATE_FROM_MAHONY == 0
+//   #error "No 'angular rate source' specified!"
+// #endif
+
+
+namespace cfg {
 
 namespace imu {
-const uint8_t i2cAddress = 0x68;
-namespace lowPassFilter {
-// EepromSetting<int8_t> common(SettingId::imuLpf_common, 2, 50, 0, 6, 1);
-// namespace angularVelocity {
-// EepromSetting<bool> state(SettingId::imuLpfAv_state, false, 55, 0, 1);
-// EepromSetting<float> alpha(SettingId::imuLpfAv_alpha, 1, 60, 0.025, 1.0, 0.025); //3
-// float oneMinusAlpha = 1 - alpha();
-// } //namespace angularVelocity
-// namespace acceleration {
-// EepromSetting<bool> state(SettingId::imuLpfAcc_state, false, 65, 0, 1);
-// EepromSetting<float> alpha(SettingId::imuLpfAcc_alpha, 1, 70, 0.025, 1.0, 0.025); //5
-// float oneMinusAlpha = 1 - alpha();
-// } //namespace acceleration
-} //namespace lowPassFilter
-// namespace complementary {
-// EepromSetting<float> alpha(SettingId::imuComplementary_alpha, 0.980, 75, 0.7, 0.998, 0.001); //6
-// float oneMinusAlpha = 1 - alpha();
-// } //namespace complementary
-// const float epsilon = 0.001;
-} //namespace imu
+bool median_filter_acc = false;
 
-namespace communication {
-const uint32_t commandTimeout = 350000;
-const int8_t powerAmplification = 3;
-const int8_t dataRate = 1;
-const int8_t retryDelay = 1;
-const int8_t retryCount = 1;
-const int8_t crcLength = 2;
-// EepromSetting<int8_t> powerAmplification(SettingId::comm_pa, 3, 80, 0, 3, 1);
-// EepromSetting<int8_t> dataRate(SettingId::comm_dataRate, 1, 85, 0, 2, 1);
-// EepromSetting<int8_t> retryDelay(SettingId::comm_retryDelay, 1, 90, 0, 15, 1);
-// EepromSetting<int8_t> retryCount(SettingId::comm_retryCount, 1, 95, 0, 15, 1);
-// EepromSetting<int8_t> crcLength(SettingId::comm_crcLength, 2, 100, 0, 2, 1);
-namespace telemetry {
-EepromSetting<int8_t> type(SettingId::commTelemetry_type, 1, 105, 1, 4, 1);
-} //namespace telemetry
-} //namespace communication
+namespace offset {
+#if defined(IMU_MPU6050)
+int16_t accel[3] = {-5424, -5998, 1419};
+int16_t gyro[3] = {62, -62, 9};
+#elif defined(IMU_MPU925x)
+int16_t accel[3] = {2576, -2493, 6261};
+int16_t gyro[3] = {29, -9, 49};
+#endif
+} // namespace offset
+} // namespace imu
+
 
 namespace ctlr {
 namespace att {
-namespace rate {
-EepromSetting<float> P(SettingId::regInner_p, 0.15, 110, 0.1, 0.7, 0.025);
-EepromSetting<float> yawP(SettingId::regInner_yawP, 0.8, 115, 0.1, 1.0, 0.025);
-const float yawI = 0.04f; // was 0.03
-const uint32_t yaw_updateRate = 3100;
-const int16_t outputLimit = 70;
-// EepromSetting<int16_t> outputLimit(SettingId::regInner_outputLimit, 70, 120, 10, 127, 1);
-} // namespace rate
 namespace angle {
-EepromSetting<float> P(SettingId::regOuter_p, 2.3, 125, 1.5, 3.3, 0.025);
-EepromSetting<float> I(SettingId::regOuter_i, 0.5, 130, 0.0, 1.8, 0.025);
-const uint32_t updateRate = 12406;
-// EepromSetting<uint32_t> updateRate(SettingId::regOuter_updateRate, 13750, 135, 2000, 30000, 500);
-const int16_t outputLimit = 250;
-// EepromSetting<int16_t> outputLimit(SettingId::regOuter_outputLimit, 250, 140, 10, 250, 1);
+  float P = 1.7; // 1.8
+  float I = 0.35; // 0.6
 } // namespace angle
+namespace rate {
+  float P = 0.25;
+  float I = 0.0;
+  float D = 0.07;
+  // float yawP = 0.3; // 0.3
+  // float yawI = 0.0; // 0.04
+namespace yaw {
+  float P = 0.3; // 0.3
+  float I = 0.0; // 0.04
+} // namespace yaw
+} // namespace rate
 } // namespace att
-const uint8_t minimumRegulationThrottle = 3;
-const uint8_t maximumBaseThrottle = 120;
-// EepromSetting<uint8_t> minimumRegulationThrottle(SettingId::reg_minRegThrottle, 2, 145, 0, 15, 1);
-// EepromSetting<uint8_t> maximumBaseThrottle(SettingId::reg_maxBaseThrottle, 117, 150, 90, 127, 1);
-} //namespace ctlr
+} // namespace ctlr
 
 namespace indication {
-const uint32_t period = 200000;
-EepromSetting<uint8_t> armsLevel(SettingId::indication_armsLevel, 12, 155, 0, 12, 1);
-EepromSetting<bool> lamp(SettingId::indication_lamp, false, 160, 0, 1);
+uint8_t arms_level = 12;
 } //namespace indication
 
 namespace battery {
-const uint32_t updateRate = 500000;
-const float alpha = 0.7; // was 0.98
-const float lowVoltage = 11.1;
-const float criticalVoltage = 10.0f;
 } //namespace battery
 
 void init() {
-  // imu::lowPassFilter::common.init();
-  // imu::lowPassFilter::angularVelocity::state.init();
-  // imu::lowPassFilter::angularVelocity::alpha.init();
-  // imu::lowPassFilter::angularVelocity::oneMinusAlpha = 1 - imu::lowPassFilter::angularVelocity::alpha();
-  // imu::lowPassFilter::acceleration::state.init();
-  // imu::lowPassFilter::acceleration::alpha.init();
-  // imu::lowPassFilter::acceleration::oneMinusAlpha = 1 - imu::lowPassFilter::acceleration::alpha();
-  // imu::complementary::alpha.init();
-  // imu::complementary::oneMinusAlpha = 1 - imu::complementary::alpha();
+/* EEPROM map
+ * 
+ *     | 0 1 2 3 4 5 6 7 8 9 A B C D E F |
+ *     |---------------------------------|
+ * 00x | p p p p i i i i d d d d p p p p | rate P, rate I, rate D, yaw rate P
+ * 01x | i i i i d d d d p p p p i i i i | yaw rate I, yaw rate D, angle P, angle I
+ * 02x | p p p p i i i i f f f f m m m m | mahony P, mahony I, accel LPF, IMU LPF
+ * 03x | a l . . . . . . . . . . . . . . | arms LEDs, lamp
+ * 04x | x x x x . y y y y . z z z z . . | MPU6050 accel offset
+ * 05x | x x x x . y y y y . z z z z . . | MPU6050 gyro offset
+ * 06x | x x x x . y y y y . z z z z . . | MPU9255 accel offset
+ * 07x | x x x x . y y y y . z z z z . . | MPU9255 gyro offset
+ * 08x | n . . . . . . . . . . . . . . . | Int(motor) ndx
+ * 09x | 1 1 1 1 2 2 2 2 3 3 3 3 4 4 4 4 | Int(motor) 1, 2, 3, 4
+ * 0Ax | 5 5 5 5 6 6 6 6 7 7 7 7 8 8 8 8 | Int(motor) 5, 6, 7, 8
+ * 0Bx | . . . . . . . . . . . . . . . . |
+ * 0Cx | . . . . . . . . . . . . . . . . |
+ * 0Dx | . . . . . . . . . . . . . . . . |
+ * 01x | . . . . . . . . . . . . . . . . |
+ * 0Ex | . . . . . . . . . . . . . . . . |
+ * 0Fx | . . . . . . . . . . . . . . . . |
+ * 100 - 2FF ...
+ * 30x | . . . . . . . . . . . . . . . . |
+ * 31x | . . . . . . . . . . . . . . . . |
+ * 32x | . . . . . . . . . . . . . . . . |
+ * 33x | . . . . . . . . . . . . . . . . |
+ * 34x | . . . . . . . . . . . . . . . . |
+ * 35x | . . . . . . . . . . . . . . . . |
+ * 36x | . . . . . . . . . . . . . . . . |
+ * 37x | . . . . . . . . . . . . . . . . |
+ * 38x | . . . . . . . . . . . . . . . . |
+ * 39x | . . . . . . . . . . . . . . . . |
+ * 3Ax | . . . . . . . . . . . . . . . . |
+ * 3Bx | . . . . . . . . . . . . . . . . |
+ * 3Cx | . . . . . . . . . . . . . . . . |
+ * 3Dx | . . . . . . . . . . . . . . . . |
+ * 3Ex | . . . x x x x . x x x x . x x x | rateD rateP yaw_rateP(3/4)
+ * 3Fx | x . x x x x . x x x x . x x x x | yaw_rateP(1/4) yaw_rateI angleP angleI
 
-  // communication::powerAmplification.init();
-  // communication::dataRate.init();
-  // communication::retryDelay.init();
-  // communication::retryCount.init();
-  // communication::crcLength.init();
-  communication::telemetry::type.init();
+Integrated motor output:
+Int_motor += tl+tr+bl+br;
 
-  ctlr::att::rate::P.init();
-  ctlr::att::rate::yawP.init();
-  // ctlr::att::rate::outputLimit.init();
-  ctlr::att::angle::P.init();
-  ctlr::att::angle::I.init();
-  // ctlr::att::angle::updateRate.init();
-  // ctlr::att::angle::outputLimit.init();
-  // ctlr::minimumRegulationThrottle.init();
-  // ctlr::maximumBaseThrottle.init();
+Max acceleration (x, y, z), min RMS acceleration
+Max angular velocity (x, y, z)
 
-  indication::armsLevel.init();
-  indication::lamp.init();
+
+ */
+
+
+  #if RESET_EEPROM_TO_DEFAULT
+  while (!eeprom_is_ready());
+  eeprom_write_float((float*)eeprom::rateD,
+    (float)ctlr::att::rate::D);
+
+  while (!eeprom_is_ready());
+  eeprom_write_float((float*)eeprom::rateP,
+    (float)ctlr::att::rate::P);
+
+  while (!eeprom_is_ready());
+  eeprom_write_float((float*)eeprom::rateYawP,
+    (float)ctlr::att::rate::yaw::P);
+
+  while (!eeprom_is_ready());
+  eeprom_write_float((float*)eeprom::rateYawI,
+    (float)ctlr::att::rate::yaw::I);
+
+  while (!eeprom_is_ready());
+  eeprom_write_float((float*)eeprom::angleP,
+    (float)ctlr::att::angle::P);
+
+  while (!eeprom_is_ready());
+  eeprom_write_float((float*)eeprom::angleI,
+    (float)ctlr::att::angle::I);
+  #endif
+
+
+  float tmp = -123.456;
+  while (!eeprom_is_ready());
+  tmp = (float)eeprom_read_float((float*)eeprom::rateD);
+  if (tmp >= 0.0 && tmp < 0.5) {
+    ctlr::att::rate::D = tmp;
+  }
+
+  while (!eeprom_is_ready());
+  tmp = (float)eeprom_read_float((float*)eeprom::rateP);
+  if (tmp > 0.1 && tmp < 0.4) {
+    ctlr::att::rate::P = tmp;
+  }
+
+  while (!eeprom_is_ready());
+  tmp = (float)eeprom_read_float((float*)eeprom::rateYawP);
+  if (tmp > 0.2 && tmp < 0.4) {
+    ctlr::att::rate::yaw::P = tmp;
+  }
+
+  while (!eeprom_is_ready());
+  tmp = (float)eeprom_read_float((float*)eeprom::rateYawI);
+  if (tmp >= 0.0 && tmp < 0.2) {
+    ctlr::att::rate::yaw::I = tmp;
+  }
+
+  while (!eeprom_is_ready());
+  tmp = (float)eeprom_read_float((float*)eeprom::angleP);
+  if (tmp > 1.4 && tmp < 2.4) {
+    ctlr::att::angle::P = tmp;
+  }
+
+  while (!eeprom_is_ready());
+  tmp = (float)eeprom_read_float((float*)eeprom::angleI);
+  if (tmp >= 0.01 && tmp < 1.0) {
+    ctlr::att::angle::I = tmp;
+  }
 }
-} //namespace config
+
+} // namespace cfg

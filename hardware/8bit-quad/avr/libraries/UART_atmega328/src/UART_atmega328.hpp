@@ -9,6 +9,7 @@ namespace uart {
 
 bool initialize(const uint32_t baud);
 
+bool available();
 uint8_t read();
 void print(char data);
 void print(const char string[]);

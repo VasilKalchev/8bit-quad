@@ -1,91 +1,97 @@
 #include "src/config/config.hpp"
 #include "src/util/debug.hpp"
 #include "src/board/8bit-quad-fc_board.hpp"
+
 #include "src/peripheral/ADC.hpp"
-#include "UART_atmega328.hpp"
-#include "src/imu/MPU9255.hpp"
+#include <UART_atmega328.hpp>
+
+#include "src/fusion/MahonyAHRS.h"
 #include "src/control/PID.hpp"
-#include "src/radio/nRF24L01p.hpp"
-#include "src/peripheral/eeprom.hpp"
 #include "src/util/utils.hpp"
 
-#include <MahonyAHRS.hpp>
-Mahony mahony(1.0f / 322.0f); // sample period, seconds (322 Hz)
+#include "src/rx/rx.hpp"
+#include "src/config/config_rx.hpp"
 
-#include <i2c_BMP280.h>
-BMP280 bmp;
-float takeOffAltitude = 0.0f;
-float takeOffPressure = 0.0f;
-float relativeAltitude = 0.0f;
-const float seaLevelPressure = 101325.0f;
 
-using namespace m328;
+
+#if defined(IMU_MPU6050)
+  #include "src/imu/MPU6050.hpp"
+#elif defined(IMU_MPU925x)
+  #include "src/imu/MPU9255.hpp"
+#endif
+
+
+enum class k_FlightMode : uint8_t {
+  Angle, Acro, Direct,
+};
+
+enum State : uint8_t {
+  k_On = 1, k_Off = 0, k_FullOn = 255, k_HalfOn = 127,
+};
+
+enum class k_Status {
+  normal, warning, error,
+};
+
+
+// Global instances
+rx::State_t g_rx_state;
+k_FlightMode g_flight_mode;
+Mahony g_mahony;
 
 namespace imu {
-MPU9255 mpu9255(config::imu::i2cAddress);
+#if defined(IMU_MPU6050)
+  MPU6050_i2cDev g_mpu(cfg::imu::i2c_address);
+#elif defined(IMU_MPU925x)
+  MPU9255 g_mpu(cfg::imu::i2c_address);
+#endif
 } //namespace imu
-AngularVelocity angularVelocity;
-Acceleration acceleration;
-Attitude attitude;
-float avPitch = 0.0f;
-float avRoll = 0.0f;
-float avYaw = 0.0;
+
+// Declared in src/imu/imu_types.hpp
+AngularVelocity g_angular_velocity;
+Acceleration g_acceleration;
+Attitude g_attitude;
 
 
-namespace comm {
-nRF24L01p_RF24 rf24(Role::drone, pin::communication::ino::ce, pin::communication::ino::csn);
-} //namespace comm
-Command command;
-int16_t throttle = 0;
-
+// Ctlr
 namespace ctlr {
+  namespace att {
+    namespace rate {
+      namespace sp {
+        int16_t pitch = 0;
+        int16_t roll = 0;
+      } // namespace sp
 
-namespace att {
+      namespace output {
+        int16_t pitch = 0;
+        int16_t roll = 0;
+        int16_t yaw = 0;
+      } // namespace output
 
-namespace rate {
-namespace setpoint {
-int16_t pitch = 0;
-int16_t roll = 0;
-} //namespace setpoint
-namespace output {
-int16_t pitch = 0;
-int16_t roll = 0;
-int16_t yaw = 0;
-} //namespace output
-Pcontroller pitch(&setpoint::pitch, &angularVelocity.x, &output::pitch);
-Pcontroller roll(&setpoint::roll, &angularVelocity.y, &output::roll);
-PID yaw(&command.yaw, &avYaw, &output::yaw);
-} //namespace rate
+      PID pitch(&sp::pitch, &g_angular_velocity.x, &output::pitch);
+      PID roll(&sp::roll, &g_angular_velocity.y, &output::roll);
+      PID yaw(&g_rx_state.yaw, &g_angular_velocity.z, &output::yaw);
+    } // namespace rate
 
-namespace angle {
-PID pitch(&command.pitch, &attitude.pitch, &rate::setpoint::pitch);
-PID roll(&command.roll, &attitude.roll, &rate::setpoint::roll);
-} //namespace angle
+    namespace angle {
+      PID pitch(&g_rx_state.pitch, &g_attitude.pitch, &rate::sp::pitch);
+      PID roll(&g_rx_state.roll, &g_attitude.roll, &rate::sp::roll);
+    } // namespace angle
 
-} //namespace att
-
-} //namespace ctlr
+  } // namespace att
+} // namespace ctlr
 
 
 namespace status {
-Status communication = Status::normal;
-Status battery = Status::normal;
-} //namespace status
+  k_Status communication = k_Status::normal;
+  k_Status battery = k_Status::normal;
+} // namespace status
+
+float g_battery_voltage = 0.0;
 
 
-float batteryVoltage = 0.0;
-
-
-
-void handleCommand();
-void handleSetting(Setting & setting);
-
-#define EXACT_TIMING true
-#if EXACT_TIMING
-#  define WAIT_FOR_CYCLE(LUS) while (micros() - LUS < config::cycleTime);
-#else
-#  define WAIT_FOR_CYCLE(LUS)
-#endif
+#define SYNC_SUB_CYCLE(LUS) while (micros() - LUS < cfg::schedule::sub_cycle_time);
+#define SYNC_CYCLE(LUS) while (micros() - LUS < cfg::schedule::cycle_time);
 
 
 void setup() {
@@ -93,596 +99,939 @@ void setup() {
 
   replaceTimer0WithTimer2();
 
+  UART_INIT(cfg::uart_baud_rate);
+  PRINT(F("\nRST---\nMAD 0 RC\n\n"));
+
+  cfg::init();
+
   initIO();
-  indication::signal(OFF);
-  indication::warning(ON);
-  indication::arms(OFF);
+  indication::signal(k_Off);
+  indication::warning(k_On);
+  indication::arms(k_Off);
 
   Wire.begin();
-  // TODO: measure maximal I2C time and set timeout in I2C helper lib.
-  // 14 byte read: 308us @ 800kHz, bad SCL signal
-  Wire.setClock(800000); // was 400000
-  TWBR = 12; // 400 kHz (maximum)
+  Wire.setClock(cfg::imu::clock_speed); // 800kHz
+  // TWBR = 12;  // 400 kHz (maximum)
 
-  INIT_UART(config::debug::baud);
-  uart::initialize(config::debug::baud);
-  DEBUGLN("FC2.\n");
+  DBG_PIN_INIT();
 
-  config::init();
-#if DEBUG_SETTINGS
-  DEBUGLN("  SETTINGS");
-  DEBUG("  Telemetry type: "); DEBUGLN(config::communication::telemetry::type());
-  DEBUG("  Pi: "); DEBUGLN(config::ctlr::att::rate::P());
-  DEBUG("  Pi_yaw: "); DEBUGLN(config::ctlr::att::rate::yawP());
-  DEBUG("  Po: "); DEBUGLN(config::ctlr::att::angle::P());
-  DEBUG("  Io: "); DEBUGLN(config::ctlr::att::angle::I());
-  DEBUG("  Arms level (0-12): "); DEBUGLN(config::indication::armsLevel());
-  DEBUG("  Lamp: "); if (config::indication::lamp()) {DEBUGLN("ON");} else {DEBUGLN("OFF");}
-  DEBUGLN("  -----\n");
-#endif
+
+  PRINT(F("CFG ---\n"));
+
+  PRINT(F(" ANGLE ctlr\n"));
+  PRINT(F("  P = ")); PRINT(cfg::ctlr::att::angle::P);
+  PRINT(F("\tI = ")); PRINT(cfg::ctlr::att::angle::I); PRINT(F("\n\n"));
+
+  PRINT(F(" RATE ctlr\n"));
+  PRINT(F("  tilt: P = ")); PRINT(cfg::ctlr::att::rate::P);
+  PRINT(F("\tI = ")); PRINT(cfg::ctlr::att::rate::I);
+  PRINT(F("\tD = ")); PRINT(cfg::ctlr::att::rate::D); PRINT(F("\n"));
+  PRINT(F("  yaw: P = ")); PRINT(cfg::ctlr::att::rate::yaw::P);
+  PRINT(F("\tI = ")); PRINT(cfg::ctlr::att::rate::yaw::I); PRINT(F("\n\n"));
+
+  PRINT(F("Max input\n"));
+  PRINT(F("throttle: ")); PRINT(1000 / cfg::rx::div::throttle);
+  PRINT(F("\nangle: ")); PRINT(500 / cfg::rx::div::angle_tilt);
+  PRINT(F("\nrate: ")); PRINT(500 / cfg::rx::div::rate_tilt);
+  PRINT(F("\nrate yaw: ")); PRINT(500 / cfg::rx::div::rate_yaw);
+  PRINT(F("\nraw tilt: ")); PRINT(500 / cfg::rx::div::tilt);
+  PRINT(F("\nraw yaw: ")); PRINT(500 / cfg::rx::div::yaw);
+  PRINT(F("\n\n"));
+
+  PRINT(F("^^^\n"));
 
   initADC();
 
   // IMU initialization
-  DEBUG("IMU");
-  success &= imu::mpu9255.initialize();
-  DEBUG(" done. T = "); DEBUG(imu::mpu9255.getTemperature()); DEBUGLN("degC.");
+  PRINT(F("IMU "));
+  success &= imu::g_mpu.initialize();
+  if (success) { PRINT(F("done")); } else { PRINT(F("fail")); }
+  PRINT(F("\n"));
+  // PRINT(F(". T = ")); PRINT(imu::g_mpu.getTemperature()); PRINT(F("degC.\n"));
   // ~IMU initialization -----
 
-
-  // Communication initialization
-  DEBUG("Communication");
-  comm::rf24.initialize();
-  comm::rf24.setPALevel(RF24_PA_MAX);
-  //RF24_PA_MIN = 0,RF24_PA_LOW, RF24_PA_HIGH, RF24_PA_MAX, RF24_PA_ERROR - rf24_pa_dbm_e;
-  comm::rf24.setDataRate(RF24_2MBPS);
-  //RF24_1MBPS = 0, RF24_2MBPS, RF24_250KBPS - rf24_datarate_e;
-  comm::rf24.setRetries(config::communication::retryDelay, config::communication::retryCount);
-  comm::rf24.setCRCLength(config::communication::crcLength);
-  success &= comm::rf24.isChipConnected();
-  if (comm::rf24.isChipConnected()) { DEBUGLN(" done."); }
-  // ~Communication initialization -----
+  g_mahony.begin(384);
 
   // Regulation initialization
-  // DEBUG("Regulation");
-  success &= ctlr::att::rate::pitch.setTunings(config::ctlr::att::rate::P());
-  success &= ctlr::att::rate::roll.setTunings(config::ctlr::att::rate::P());
-  success &= ctlr::att::rate::yaw.setTunings(config::ctlr::att::rate::yawP(),
-                                        config::ctlr::att::rate::yawI);
-  ctlr::att::rate::yaw.setUpdateRate(config::ctlr::att::rate::yaw_updateRate);
-  success &= ctlr::att::rate::pitch.setOutputLimits(config::ctlr::att::rate::outputLimit);
-  success &= ctlr::att::rate::roll.setOutputLimits(config::ctlr::att::rate::outputLimit);
-  success &= ctlr::att::rate::yaw.setOutputLimits(config::ctlr::att::rate::outputLimit);
-  success &= ctlr::att::rate::yaw.setIntegralLimit(2);
-  ctlr::att::rate::pitch.on(); ctlr::att::rate::roll.on(); ctlr::att::rate::yaw.on();
+  PRINT(F("Regulation "));
+  success &= ctlr::att::rate::pitch.setTunings(
+    cfg::ctlr::att::rate::P,
+    cfg::ctlr::att::rate::I,
+    cfg::ctlr::att::rate::D
+    );
+  success &= ctlr::att::rate::roll.setTunings(
+    cfg::ctlr::att::rate::P,
+    cfg::ctlr::att::rate::I,
+    cfg::ctlr::att::rate::D
+    );
+  success &= ctlr::att::rate::yaw.setTunings(
+    cfg::ctlr::att::rate::yaw::P,
+    cfg::ctlr::att::rate::yaw::I
+    );
+  ctlr::att::rate::yaw.setUpdateRate(cfg::ctlr::att::rate::yaw::update_rate);
+  success &= ctlr::att::rate::pitch.setOutputLimits(
+    cfg::ctlr::att::rate::output_limit);
+  success &= ctlr::att::rate::roll.setOutputLimits(
+    cfg::ctlr::att::rate::output_limit);
+  success &= ctlr::att::rate::yaw.setOutputLimits(
+    cfg::ctlr::att::rate::output_limit);
+  success &= ctlr::att::rate::yaw.setIntegralLimit(
+    cfg::ctlr::att::rate::yaw::integral_limit);
+  ctlr::att::rate::pitch.on();
+  ctlr::att::rate::roll.on();
+  ctlr::att::rate::yaw.on();
 
-  success &= ctlr::att::angle::pitch.setTunings(config::ctlr::att::angle::P(), config::ctlr::att::angle::I());
-  success &= ctlr::att::angle::roll.setTunings(config::ctlr::att::angle::P(), config::ctlr::att::angle::I());
-  ctlr::att::angle::pitch.setUpdateRate(config::ctlr::att::angle::updateRate);
-  ctlr::att::angle::roll.setUpdateRate(config::ctlr::att::angle::updateRate);
-  success &= ctlr::att::angle::pitch.setOutputLimits(config::ctlr::att::angle::outputLimit);
-  success &= ctlr::att::angle::roll.setOutputLimits(config::ctlr::att::angle::outputLimit);
-  success &= ctlr::att::angle::pitch.setIntegralLimit(64);
-  success &= ctlr::att::angle::roll.setIntegralLimit(64);
-  ctlr::att::angle::pitch.on(); ctlr::att::angle::roll.on();
+  success &= ctlr::att::angle::pitch.setTunings(
+    cfg::ctlr::att::angle::P,
+    cfg::ctlr::att::angle::I
+    );
+  success &= ctlr::att::angle::roll.setTunings(
+    cfg::ctlr::att::angle::P,
+    cfg::ctlr::att::angle::I
+    );
+  ctlr::att::angle::pitch.setUpdateRate(cfg::ctlr::att::angle::update_rate);
+  ctlr::att::angle::roll.setUpdateRate(cfg::ctlr::att::angle::update_rate);
+  success &= ctlr::att::angle::pitch.setOutputLimits(
+    cfg::ctlr::att::angle::output_limit);
+  success &= ctlr::att::angle::roll.setOutputLimits(
+    cfg::ctlr::att::angle::output_limit);
+  success &= ctlr::att::angle::pitch.setIntegralLimit(
+    cfg::ctlr::att::angle::integral_limit);
+  success &= ctlr::att::angle::roll.setIntegralLimit(
+    cfg::ctlr::att::angle::integral_limit);
+  ctlr::att::angle::pitch.on();
+  ctlr::att::angle::roll.on();
+
+  if (success) PRINT(F("done")); else PRINT(F("fail"));
+  PRINT(F("\n"));
   // ~Regulation initialization -----
 
-
-  bmp.initialize();
-  bmp.setPressureOversampleRatio(16);
-  bmp.setTemperatureOversampleRatio(1);
-  bmp.setFilterRatio(16);
-  bmp.setStandby(0);
-  bmp.setEnabled(true);
-
-  float p = 0.0f;
-  float t = 0.0f;
-  for (uint16_t i = 0; i < 100; ++i) {
-    bmp.read(p, t);
+  if (success == false) {
+    PRINT(F("Wrong init config!"));
+    exit(0);
   }
-  float pSum = 0.0f;
-  float tSum = 0.0f;
-  const uint16_t samples = 10;
-  for (uint16_t i = 0; i < samples; ++i) {
-    bmp.read(p, t);
-    pSum += p;
-    tSum += t;
-  }
-  p = pSum / samples;
-  t = tSum / samples;
 
-  takeOffPressure = p;
-  takeOffAltitude = calculateAltitude(p, seaLevelPressure, t);
-  uart::print("P: "); uart::print(p);
-  uart::print("Pa, A: "); uart::print(takeOffAltitude); uart::print("m\n");
+  indication::signal(k_On);
+  indication::warning(k_Off);
+  indication::lamp(cfg::indication::lamp);
 
+  sei(); // enable interrupts
 
-  if (!success) { DEBUG("Wrong initialization configuration! Terminated."); exit(0); }
-  indication::signal(ON);
-  indication::warning(OFF);
-  indication::lamp(config::indication::lamp());
-  // indication::arms(0);
-  // DEBUGLN("Setup done.\n----------");
+  PRINT(F("Setup done.\n---"));
 } //void setup()
 
 
 void loop() {
-  static uint32_t microsThisCycle = micros();
+  /* Component: Microseconds for this cycle
+   * Variable that stores the microseconds since power-on. It is updated at the
+   * beginning of the cycle. Can be used as a liter alternative for
+   * non-critical timing.
+   */
+  static uint32_t usec_cycle_s = micros(); // used as a faster alternative
 
-#if DEBUG_LOOP_TIME
-  uart::print(micros() - microsThisCycle);
-#endif
 
-  microsThisCycle = micros();
+  /* Component: Sub-cycle
+   * Sub-cycle index.
+   */
+  static int8_t sub_cycle_s = -1;
+  ++sub_cycle_s;
+
+  // keep sub-cycle index in range
+  if ((sub_cycle_s >= (uint8_t)cfg::schedule::SubCycle_ndx::OUT_OF_RANGE) || (sub_cycle_s < (uint8_t)cfg::schedule::SubCycle_ndx::FIRST)) {
+    sub_cycle_s = (uint8_t)cfg::schedule::SubCycle_ndx::FIRST;
+  }
 
 
-  // Regulation
-  static uint32_t innerComputeLUS = microsThisCycle;
-  WAIT_FOR_CYCLE(innerComputeLUS);
-  innerComputeLUS = micros();
+  #if PRINT_LOOP_PERIOD
+  PRINT(sub_cycle_s); PRINT(F("\t"));
+  PRINT(micros() - usec_cycle_s); PRINT(F("\n"));
+  #endif
+
+  #if DEBUG_LOOP_PERIOD
+  DBG_PIN_TOGGLE();
+  #endif
+
+  usec_cycle_s = micros();
+
+
+  /* Angular rates controllers
+   * timing: exact
+   * schedule: 4/4 (every sub-cycle)
+   * cpu time: ~350usec
+   */
+  static uint32_t angular_rate_ctlr_last_usec_s = usec_cycle_s;
+  SYNC_SUB_CYCLE(angular_rate_ctlr_last_usec_s);
+  #if PRINT_RATE_CTRL_PERIOD
+  PRINT(micros() - angular_rate_ctlr_last_usec_s); PRINT(F("\n"));
+  #endif
+  #if DEBUG_RATE_CTRL_PERIOD
+  DBG_PIN_TOGGLE();
+  #endif
+
+  angular_rate_ctlr_last_usec_s = micros();
   ctlr::att::rate::yaw.compute();
   ctlr::att::rate::pitch.compute();
   ctlr::att::rate::roll.compute();
+  // ~Angular rate controller ---
 
-  /* Cycles:
-  0 - Compute outer PID
-  1 - Battery voltage, Altitude
-  2 - Communication[1/2], Indication[1/2]
-  3 - Communication[1/2], Indication[1/2]
-  */
-  static int8_t innerCycles = 0;
-  ++innerCycles;
 
-  if (innerCycles >= 4 || innerCycles < 0) {
-    innerCycles = 0;
+  /* Angle controller
+   * timing: exact
+   * schedule: 1/4 (every 4 cycles)
+   * cpu time: ~240usec
+   */
+  if (sub_cycle_s == (uint8_t)cfg::schedule::SubCycle_ndx::angleCtrl) {
+    static uint32_t angle_ctlr_last_usec_s = usec_cycle_s;
+    SYNC_CYCLE(angle_ctlr_last_usec_s);
+    #if PRINT_ANGLE_CTRL_PERIOD
+    PRINT(micros() - angle_ctlr_last_usec_s); PRINT(F("\n"));
+    #endif
+    #if DEBUG_ANGLE_CTRL_PERIOD
+    DBG_PIN_TOGGLE();
+    #endif
+
+    angle_ctlr_last_usec_s = micros();
     ctlr::att::angle::pitch.compute();
     ctlr::att::angle::roll.compute();
-  }
 
-#if DEBUG_PID_PITCH
-  if (!innerCycles % 3) {
-    if (command.flightMode == FlightMode::stabilize) {
-      uart::print(command.pitch);
-      uart::print(","); uart::print(attitude.pitch);
+
+    #if PRINT_CTRL_PITCH
+    if (g_flight_mode == k_FlightMode::Acro) {
+      PRINT(F(",")); PRINT(ctlr::att::rate::sp::pitch);
+      PRINT(F(",")); PRINT(g_angular_velocity.y);
     } else {
-      uart::print(","); uart::print(ctlr::att::rate::setpoint::pitch);
-      uart::print(","); uart::print(angularVelocity.y);
+      PRINT(g_rx_state.pitch);
+      PRINT(F(",")); PRINT(g_attitude.pitch);
     }
-    uart::print(","); uart::print(ctlr::att::rate::output::pitch); uart::print("\n");
-  }
-#endif
-#if DEBUG_PID_ROLL
-  if (!innerCycles % 3) {
-    if (command.flightMode == FlightMode::stabilize) {
-      uart::print(command.roll);
-      uart::print(","); uart::print(attitude.roll);
+    PRINT(F(",")); PRINT(ctlr::att::rate::output::pitch);
+    PRINT(F("\n"));
+    #endif
+
+    #if PRINT_CTRL_ROLL
+    if (g_flight_mode == k_FlightMode::Acro) {
+      PRINT(F(",")); PRINT(ctlr::att::rate::sp::roll);
+      PRINT(F(",")); PRINT(g_angular_velocity.x);
+    } else {
+      PRINT(g_rx_state.roll);
+      PRINT(F(",")); PRINT(g_attitude.roll);
     }
-    uart::print(","); uart::print(ctlr::att::rate::setpoint::roll);
-    uart::print(","); uart::print(angularVelocity.x);
-    uart::print(","); uart::print(ctlr::att::rate::output::roll); uart::print("\n");
+    PRINT(F(",")); PRINT(ctlr::att::rate::output::roll);
+    PRINT(F("\n"));
+    #endif
+
+    #if PRINT_CTRL_YAW
+    PRINT(g_rx_state.yaw);
+    PRINT(F(", ")); PRINT(g_angular_velocity.z);
+    PRINT(F(", ")); PRINT(ctlr::att::rate::output::yaw);
+    PRINT(F("\n"));
+    #endif
   }
-#endif
-#if DEBUG_PID_YAW
-  if (!innerCycles % 3) {
-    uart::print(command.yaw);
-    uart::print(", "); uart::print(avYaw);
-    uart::print(", "); uart::print(ctlr::att::rate::output::yaw);
-    uart::print("\n");
+  // ~Angle controller ---
+
+
+  /* Read IMU
+   * timing: loose
+   * schedule: 4/4 (every cycle)
+   * cpu time: ~530usec @ 800kHz, ~650usec @ 500kHz, ~740usec @ 400kHz
+   */
+  uint8_t imu_rd_st = imu::g_mpu.getMotion(&g_angular_velocity, &g_acceleration);
+  #if DEBUG
+  static uint16_t rd_fails = 0;
+  static uint16_t zeroes = 0;
+  if (imu_rd_st == 1) {
+    PRINT(F("IMU blank: ")); PRINT(zeroes++); PRINT(F("\n"));
+  } else if (imu_rd_st == 2) {
+    PRINT(F("IMU fails: ")); PRINT(rd_fails++); PRINT(F("\n"));
   }
-#endif
-  // ~Regulation -----
+  #endif
+
+  // g_angular_velocity.z += 0.05; // trim yaw
+
+  // if (cfg::imu::median_filter_acc == true) {
+  //   static uint8_t acc_ndx = 0;
+  //   static Acceleration acc_f;
+  //   static Acceleration acc_buff[2];
+  //   if (acc_ndx < 2) {
+  //     acc_buff[acc_ndx].x = g_acceleration.x;
+  //     acc_buff[acc_ndx].y = g_acceleration.y;
+  //     acc_buff[acc_ndx].z = g_acceleration.z;
+  //     ++acc_ndx;
+  //   } else {
+  //     acc_ndx = 0;
+  //     acc_f.x = util::Median(acc_buff[0].x,
+  //       acc_buff[1].x, g_acceleration.x);
+  //     acc_f.y = util::Median(acc_buff[0].y,
+  //       acc_buff[1].y, g_acceleration.y);
+  //     acc_f.z = util::Median(acc_buff[0].z,
+  //       acc_buff[1].z, g_acceleration.z);
+  //   }
+
+  //   g_acceleration.x = acc_f.x;
+  //   g_acceleration.y = acc_f.y;
+  //   g_acceleration.z = acc_f.z;
+  // }
 
 
-  // Attitude -----
-  // Fetch
-  uint8_t imuStatus = imu::mpu9255.getMotion(&angularVelocity, &acceleration);
-  static uint32_t imuZeroReads = 0;
-  static uint32_t imuReadFailures = 0;
-  if (imuStatus == 1) {
-    ++imuZeroReads;
-    DEBUG("IMU zero read: "); DEBUGLN(imuZeroReads);
-  } else if (imuStatus == 2) {
-    ++imuReadFailures;
-    DEBUG("IMU I2C fail: "); DEBUGLN(imuReadFailures);
+  #if PRINT_ANGULAR_RATE
+  PRINT(g_angular_velocity.x); PRINT(F(", "));
+  PRINT(g_angular_velocity.y); PRINT(F(", "));
+  PRINT(g_angular_velocity.z); PRINT(F(", "));
+  // static float heading = 0;
+  // heading += g_angular_velocity.z;
+  // PRINT(heading);
+  PRINT(F("\n"));
+  #endif
+
+  #if PRINT_ACCELERATION
+  PRINT(g_acceleration.x); PRINT(F(", "));
+  PRINT(g_acceleration.y); PRINT(F(", "));
+  PRINT(g_acceleration.z - 16384); PRINT(F("\n"));
+  #endif
+  // ~Read IMU ---
+
+
+  /* Fusion
+   * timing: exact
+   * schedule: 4/4 (every cycle)
+   * cpu time: 
+   *  complementary: N/A
+   *  Mahony: fuse 1000usec + quat to p+r: 680usec
+   */
+  // Complementary filter
+  #if ATTITUDE_FUSION_METHOD_COMPLEMENTARY
+  float x_sqr = square((float)g_acceleration.x);
+  float y_sqr = square((float)g_acceleration.y);
+  float z_sqr = square((float)g_acceleration.z);
+
+  float roll_a = atan2( (float) - g_acceleration.x,
+    sqrt(y_sqr + z_sqr) )
+  * util::toDegrees;
+  float pitch_a = atan2( (float) g_acceleration.y,
+    util::sign(g_acceleration.z) * sqrt(z_sqr + (cfg::imu::epsilon * x_sqr)))
+  * util::toDegrees;
+
+  static uint32_t fusion_last_usec_s = usec_cycle_s;
+  uint32_t usec_now = micros();
+  float fusion_dt_sec = (float)(usec_now - fusion_last_usec_s) / 1000000.0f;
+  fusion_last_usec_s = usec_now;
+
+  g_attitude.pitch = (g_attitude.pitch + g_angular_velocity.x * fusion_dt_sec) * cfg::imu::complementary::alpha()
+  + pitch_a * cfg::imu::complementary::oneMinusAlpha;
+  g_attitude.roll = (g_attitude.roll + g_angular_velocity.y * fusion_dt_sec) * cfg::imu::complementary::alpha()
+  + roll_a * cfg::imu::complementary::oneMinusAlpha;
+
+  // Mahony
+  #elif ATTITUDE_FUSION_METHOD_MAHONY
+  static uint32_t fusion_last_usec_s = usec_cycle_s;
+  SYNC_SUB_CYCLE(fusion_last_usec_s);
+  #if PRINT_FUSION_PERIOD
+  PRINT(micros() - fusion_last_usec_s); PRINT(F("\n"));
+  #endif
+  #if DEBUG_FUSION_PERIOD
+  DBG_PIN_TOGGLE();
+  #endif
+
+  fusion_last_usec_s = micros();
+  g_mahony.updateIMU(g_angular_velocity.x, g_angular_velocity.y, g_angular_velocity.z,
+   g_acceleration.x, g_acceleration.y, g_acceleration.z);
+  #endif // mahony
+  // ~Fusion ---
+
+
+  /* Quaternion to Euler
+   * timing: loose
+   * schedule: 1/4 (every 4 cycles)
+   * cpu time: ~680usec
+   */
+  #if ATTITUDE_FUSION_METHOD_MAHONY
+  if (sub_cycle_s == (uint8_t)cfg::schedule::SubCycle_ndx::quat2euler) {
+    #if PRINT_QUAT2EULER_PERIOD
+    PRINT(micros() - quat2euler_last_usec_s); PRINT(F("\n"));
+    #endif
+    #if DEBUG_QUAT2EULER_PERIOD
+    DBG_PIN_TOGGLE();
+    #endif
+
+    g_attitude.roll = g_mahony.getPitch();
+    g_attitude.pitch = g_mahony.getRoll();
   }
+  #endif // fusion method = Mahony
 
-
-#if DEBUG_ANGULAR_VELOCITY
-  if (innerCycles == 0) {
-    uart::print(angularVelocity.x); uart::print(", ");
-    uart::print(angularVelocity.y); uart::print(", ");
-    uart::print(angularVelocity.z); uart::print("\n");
+  #if PRINT_ATTITUDE
+  if (sub_cycle_s == (uint8_t)cfg::schedule::SubCycle_ndx::quat2euler) {
+    PRINT(g_attitude.pitch); PRINT(F(", "));
+    PRINT(g_attitude.roll); PRINT(F("\n"));
   }
-#endif
-#if DEBUG_ACCELERATION
-  if (innerCycles == 0) {
-    uart::print(acceleration.x); uart::print(", ");
-    uart::print(acceleration.y); uart::print(", ");
-    uart::print(acceleration.z); uart::print("\n");
-  }
-#endif
+  #endif
 
 
-#define MAHONY_FUSION true
-#if MAHONY_FUSION
-  static uint32_t mahonyLUS = micros();
-  WAIT_FOR_CYCLE(mahonyLUS);
-  mahonyLUS = micros();
-  float mahonyYaw, mahonyPitch, mahonyRoll;
-  mahony.update(mahonyYaw, mahonyPitch, mahonyRoll,
-                acceleration.x, acceleration.y, acceleration.z,
-                angularVelocity.x * DEG_TO_RAD, angularVelocity.y * DEG_TO_RAD, angularVelocity.z * DEG_TO_RAD);
-  attitude.roll = mahonyPitch * RAD_TO_DEG;
-  attitude.pitch = mahonyRoll * RAD_TO_DEG;
-  avYaw = angularVelocity.z;
-#endif
-
-
-#if DEBUG_ATTITUDE
-  if (innerCycles == 0) {
-    uart::print(attitude.pitch); uart::print(", "); uart::print(attitude.roll); uart::print("\n");
-  }
-#endif
-  // ~Attitude -----
-
-
-  // Motor mix
+  /* Motor mix
+   * timing: loose
+   * schedule: 4/4 (every cycle)
+   * cpu time: ~20usec
+   */
   uint8_t tl_p = 0;
   uint8_t tr_p = 0;
   uint8_t bl_p = 0;
   uint8_t br_p = 0;
-  if (throttle > config::ctlr::minimumRegulationThrottle) {
-    if (throttle > config::ctlr::maximumBaseThrottle) throttle = config::ctlr::maximumBaseThrottle;
-    tl_p = clamp(throttle
-                 + ctlr::att::rate::output::pitch + ctlr::att::rate::output::roll - ctlr::att::rate::output::yaw,
-                 0, 127);
-    tr_p = clamp(throttle
-                 + ctlr::att::rate::output::pitch - ctlr::att::rate::output::roll + ctlr::att::rate::output::yaw,
-                 0, 127);
-    bl_p = clamp(throttle
-                 - ctlr::att::rate::output::pitch + ctlr::att::rate::output::roll + ctlr::att::rate::output::yaw,
-                 0, 127);
-    br_p = clamp(throttle
-                 - ctlr::att::rate::output::pitch - ctlr::att::rate::output::roll - ctlr::att::rate::output::yaw,
-                 0, 127);
+
+  if (g_rx_state.throttle > cfg::mix::minimum_regulation_throttle) {
+    if (g_rx_state.throttle > cfg::mix::maximum_base_throttle) {
+      g_rx_state.throttle = cfg::mix::maximum_base_throttle;
+    }
+
+    #if COMPENSATE_THROTTLE_WHEN_TILTING
+    int16_t throttle_output = g_rx_state.throttle;
+
+    float tilt = abs(g_attitude.pitch) + abs(g_attitude.roll);
+    if (tilt > 45.0) tilt = 45.0;
+    float compensation = 1 + (tilt / 45.0);
+    throttle_output *= compensation;
+
+    #else
+    int16_t throttle_output = g_rx_state.throttle;
+    #endif
+
+
+    tl_p = util::clamp(throttle_output
+     + ctlr::att::rate::output::pitch + ctlr::att::rate::output::roll - ctlr::att::rate::output::yaw,
+     5, 127);
+    tr_p = util::clamp(throttle_output
+     + ctlr::att::rate::output::pitch - ctlr::att::rate::output::roll + ctlr::att::rate::output::yaw,
+     5, 127);
+    bl_p = util::clamp(throttle_output
+     - ctlr::att::rate::output::pitch + ctlr::att::rate::output::roll + ctlr::att::rate::output::yaw,
+     5, 127);
+    br_p = util::clamp(throttle_output
+     - ctlr::att::rate::output::pitch - ctlr::att::rate::output::roll - ctlr::att::rate::output::yaw,
+     5, 127);
   } else {
-    tl_p = throttle;
-    tr_p = throttle;
-    bl_p = throttle;
-    br_p = throttle;
+    tl_p = g_rx_state.throttle;
+    tr_p = g_rx_state.throttle;
+    bl_p = g_rx_state.throttle;
+    br_p = g_rx_state.throttle;
     ctlr::att::angle::pitch.unwind();
     ctlr::att::angle::roll.unwind();
     ctlr::att::rate::yaw.unwind();
   }
+
   OCR0B = 127 + tl_p;
   OCR1B = 127 + tr_p;
   OCR0A = 127 + bl_p;
   OCR1A = 127 + br_p;
 
-#if DEBUG_MOTORS
-  if (innerCycles == 0) {
-    static uint32_t dm_lm = millis();
-    if (millis() > dm_lm + 50) {
-      dm_lm = millis();
-      uart::print(OCR0B); uart::print("\t"); uart::print(OCR1B); uart::print("\n");
-      uart::print(OCR0A); uart::print("\t"); uart::print(OCR1A); uart::print("\n");
-      uint8_t i = 0;
-      while (i++ < 12) uart::print("\n");
-    }
-  }
-#endif
-// ~Motor mix -----
+
+  #if PRINT_THROTTLE
+  PRINT(g_rx_state.throttle); PRINT(F("\n"));
+  #endif
+
+  #if PRINT_MOTOR_SIGNALS
+  PRINT(OCR0B); PRINT(F("\t")); PRINT(OCR1B); PRINT(F("\n"));
+  PRINT(OCR0A); PRINT(F("\t")); PRINT(OCR1A); PRINT(F("\n\n"));
+  #endif
+  // ~Motor mix ---
 
 
-// Communication
-  static uint32_t lastCommandLUS = microsThisCycle;
-  static uint32_t batteryVoltageLUS = microsThisCycle;
-  if (innerCycles == 1 && comm::rf24.available()) {
-    while (comm::rf24.available()) {
-      uint8_t rawMessage[32];
-      comm::rf24.read(&rawMessage, 32);
-      switch ((PacketType)rawMessage[0]) {
-      case PacketType::Command:
-        memcpy(&command, &rawMessage, sizeof(command));
-        handleCommand();
-        lastCommandLUS = microsThisCycle;
-        break;
-      case PacketType::Setting:
-        Setting setting;
-        memcpy(&setting, &rawMessage, sizeof(setting));
-        handleSetting(setting);
-        break;
-      default:
-        comm::rf24.reset();
-        DEBUG("unrec "); DEBUGLN(rawMessage[0]);
-        break;
-      }
-    }
-  } else if (microsThisCycle - lastCommandLUS > config::communication::commandTimeout) {
-    throttle = 0;
-    ctlr::att::angle::pitch.on();
-    ctlr::att::angle::roll.on();
-    command.pitch = 0;
-    command.roll = 0;
-    command.yaw = 0;
-    status::communication = Status::error;
-#if DEBUG_COMMAND
-    if (command.flightMode == FlightMode::stabilize) DEBUG("STAB - ");
-    else if (command.flightMode == FlightMode::acro) DEBUG("ACRO - ");
-    else DEBUG("DIRECT - ");
-    DEBUG("TH: "); DEBUG(command.throttle); DEBUG(", P: "); DEBUG(command.pitch);
-    DEBUG(", R: "); DEBUG(command.roll); DEBUG(", Y: "); DEBUG(command.yaw);
-    DEBUGLN();
-#endif
-  } else if (innerCycles == 3 && (microsThisCycle - batteryVoltageLUS > config::battery::updateRate)) {
-    batteryVoltageLUS = microsThisCycle;
-    batteryVoltage = readBatteryVoltage();
-    static float batteryVoltage_last = 0.0;
-    batteryVoltage = lowPassFilter(batteryVoltage, batteryVoltage_last, config::battery::alpha);
-    batteryVoltage_last = batteryVoltage;
-    if (batteryVoltage > config::battery::lowVoltage) {
-      status::battery = Status::normal;
-    } else if (batteryVoltage > config::battery::criticalVoltage) {
-      status::battery = Status::warning;
-    } else {
-      status::battery = Status::error;
-    }
-  }
-// ~Communication -----
+  /* Battery voltage
+   * timing: loose
+   * schedule: 1/4 (every 4 cycles)
+   * cpu time: 160usec
+   */
+  if (sub_cycle_s == (uint8_t)cfg::schedule::SubCycle_ndx::battery) {
+    static uint32_t batt_volt_last_usec_s = 0;
+    if (usec_cycle_s - batt_volt_last_usec_s > cfg::battery::update_rate) {
+      batt_volt_last_usec_s = usec_cycle_s;
 
+      g_battery_voltage = readBatteryVoltage();
+      static float battery_voltage_last = 0.0;
+      g_battery_voltage = util::lowPassFilter(g_battery_voltage, battery_voltage_last, cfg::battery::alpha);
+      battery_voltage_last = g_battery_voltage;
 
-  // Pressure/altitude (telemetry only, no altitude hold) -----
-  static float pressure = takeOffPressure;
-  static float pressurePrev = takeOffPressure;
-  static float temperature = 0.0;
-  static float pressureRaw[3] = { takeOffPressure, takeOffPressure, takeOffPressure };
-  static uint8_t pressureNdx = 0;
+      #if PRINT_BATTERY_VOLTAGE
+      PRINT(F("Vb: ")); PRINT(g_battery_voltage); PRINT(F("\n"));
+      #endif
 
-  if (innerCycles == 2) { //~700us
-    bmp.read(pressureRaw[pressureNdx], temperature);
-  } else if (innerCycles == 3) { //~400us
-    if (pressureNdx >= 2) {
-      pressureNdx = 0;
-      pressure = middle_of_3(pressureRaw[0], pressureRaw[1], pressureRaw[2]);
-    } else {
-      ++pressureNdx;
-    }
-
-    if (pressureNdx == 0) {
-      pressure = pressure * 0.07f + pressurePrev * 0.93f;
-      pressurePrev = pressure;
-      // Serial.print("P: "); Serial.print(pressure); Serial.print("hPa\t");
-
-      float absoluteAltitude = calculateAltitude(pressure, seaLevelPressure, temperature);
-      relativeAltitude = absoluteAltitude - takeOffAltitude;
-
-      static float relativeAltitudeLastFilter = relativeAltitude;
-      relativeAltitude = relativeAltitude * 0.08f + relativeAltitudeLastFilter * 0.92f;
-      relativeAltitudeLastFilter = relativeAltitude;
-      // Serial.print("A: "); Serial.print(absoluteAltitude); Serial.print("m\t");
-      // Serial.print("RA: "); Serial.print(relativeAltitude); Serial.print("m\t");
-
-      if (absoluteAltitude < takeOffAltitude - 1.5f) {
-        takeOffAltitude = absoluteAltitude;
+      if (g_battery_voltage > cfg::battery::low_voltage) {
+        status::battery = k_Status::normal;
+      } else if (g_battery_voltage > cfg::battery::critical_voltage) {
+        status::battery = k_Status::warning;
+      } else {
+        status::battery = k_Status::error;
       }
     }
   }
-  // ~Pressure/altitude -----
 
 
-// Indication
-  if ((innerCycles == 1 || innerCycles == 3) && status::communication == Status::normal) {
-    if (indication::arms() != expMap[clamp(config::indication::armsLevel(), 0, 13)]) {
-      uint8_t armsPwm = indication::arms();
-      if (armsPwm > expMap[clamp(config::indication::armsLevel(), 0, 13)]) {
-        indication::arms(--armsPwm);
-      } else if (armsPwm < expMap[clamp(config::indication::armsLevel(), 0, 13)]) {
-        indication::arms(++armsPwm);
+  /* Indication
+   * timing: loose
+   * schedule: 1/4 (every 4 cycles)
+   * cpu time: 8usec
+   */
+  #define NEW_INDICATION (0)
+  #if NEW_INDICATION == 1
+  // run every cycle
+  // SW PWM lamp and PCB LEDs
+  // indicate current mode (on initial switch or permanently)
+  // proper fade
+
+  if (g_flight_mode == k_FlightMode::stabilize) {
+
+  }
+
+  arms_pwm_level = indication::arms();
+  if (arms_pwm_level < cfg::indication::arms_level) {
+    indication::arms(++arms_pwm_level);
+  } else if (arms_pwm_level > cfg::indication::arms_level) {
+    indication::arms(--arms_pwm_level);
+  }
+
+  #else // OLD_INDICATION
+  if (sub_cycle_s == (uint8_t)cfg::schedule::SubCycle_ndx::indication) {
+    if (status::communication == k_Status::normal) {
+      if (indication::arms() != util::expMap[util::clamp(cfg::indication::arms_level, 0, 13)]) {
+        uint8_t armsPwm_current = indication::arms();
+        if (armsPwm_current > util::expMap[util::clamp(cfg::indication::arms_level, 0, 13)]) {
+          indication::arms(--armsPwm_current);
+        } else if (armsPwm_current < util::expMap[util::clamp(cfg::indication::arms_level, 0, 13)]) {
+          indication::arms(++armsPwm_current);
+        }
+      }
+    }
+
+    static uint32_t indication_last_usec_s = usec_cycle_s;
+    if (usec_cycle_s - indication_last_usec_s > cfg::indication::period) {
+      indication_last_usec_s = usec_cycle_s;
+
+      if (status::battery == k_Status::normal && status::communication == k_Status::normal) {
+        indication::toggleSignal();
+        indication::warning(0);
+      } else if (status::communication != k_Status::normal) {
+        indication::toggleSignal();
+        indication::warning(!indication::signal());
+        indication::toggleArms();
+      } else if (status::battery == k_Status::warning) {
+        indication::toggleSignal();
+        indication::warning(!indication::signal());
+      } else if (status::battery == k_Status::error) {
+        indication::signal(0);
+        indication::toggleWarning();
+      } else {
+        status::communication = k_Status::normal;
+        status::battery = k_Status::normal;
       }
     }
   }
-  static uint32_t indicationLUS = microsThisCycle;
-  if ((innerCycles == 1) && microsThisCycle - indicationLUS > config::indication::period) {
-    indicationLUS = microsThisCycle;
-    if (status::battery == Status::normal && status::communication == Status::normal) {
-      indication::toggleSignal();
-      indication::warning(0);
-    } else if (status::communication != Status::normal) {
-      indication::toggleSignal();
-      indication::warning(!indication::signal());
-      indication::toggleArms();
-    } else if (status::battery == Status::warning) {
-      indication::toggleSignal();
-      indication::warning(!indication::signal());
-    } else if (status::battery == Status::error) {
-      indication::signal(0);
-      indication::toggleWarning();
-    } else {
-      status::communication = Status::normal;
-      status::battery = Status::normal;
-    }
-  }
-// ~Indication -----
+  #endif
+  // ~Indication -----
 
+
+  /* RC
+   * timing: loose
+   * schedule: 1/4 (every 4 cycles)
+   * cpu time: 150usec, old: 76usec
+   */
+  if (sub_cycle_s == (uint8_t)cfg::schedule::SubCycle_ndx::rc) {
+    // Read raw values
+    int16_t rc_raw[(uint8_t)cfg::rx::k_Ch::Count] = { 0 };
+
+    rx::ReadRx(pin::communication::ino::ppm,
+      rc_raw, (uint8_t)cfg::rx::k_Ch::Count);
+
+    #if PRINT_RC_RAW
+    static uint8_t print_rc_raw_div = 0;
+    if (++print_rc_raw_div > 1) {
+      print_rc_raw_div = 0;
+
+      PRINT(F("t ")); PRINT(rc_raw[(uint8_t)cfg::rx::k_Ch::Throttle]);
+      PRINT(F("\tp ")); PRINT(rc_raw[(uint8_t)cfg::rx::k_Ch::Pitch]);
+      PRINT(F("\tr ")); PRINT(rc_raw[(uint8_t)cfg::rx::k_Ch::Roll]);
+      PRINT(F("\ty ")); PRINT(rc_raw[(uint8_t)cfg::rx::k_Ch::Yaw]);
+      PRINT(F("\tab ")); PRINT(rc_raw[(uint8_t)cfg::rx::k_Ch::SwAB]);
+      PRINT(F("\tcd ")); PRINT(rc_raw[(uint8_t)cfg::rx::k_Ch::SwCD]);
+      PRINT(F("\tpA ")); PRINT(rc_raw[(uint8_t)cfg::rx::k_Ch::VrA]);
+      PRINT(F("\tpB ")); PRINT(rc_raw[(uint8_t)cfg::rx::k_Ch::VrB]);
+      PRINT(F("\n"));
+    }
+    #endif
+
+
+    for (uint8_t ndx = 0; ndx < cfg::rx::sticks_count; ++ndx) {
+      // clamp sticks' input between min (1000) and max (2000)
+      util::clamp(rc_raw[ndx], cfg::rx::input::min, cfg::rx::input::max);
+
+      if ((cfg::rx::k_Ch)ndx == cfg::rx::k_Ch::Throttle) {
+        // change range for throttle input from 1000..2000 to 0..1000
+        rc_raw[ndx] -= cfg::rx::input::min;
+      } else {
+        // change range for sticks' input from 1000..2000 to -500..500
+        rc_raw[ndx] -= cfg::rx::input::mid;
+      }
+    }
+
+    g_rx_state.throttle = rc_raw[(uint8_t)cfg::rx::k_Ch::Throttle]
+      / cfg::rx::div::throttle;
+
+
+    int16_t switches[4] = { 0 };
+
+    // Convert to switch state
+    #if RC_SW_A
+    PRINT(F("RC_SW_A no\n"));
+    switches[0] = rc_raw[(uint8_t)cfg::rx::k_Ch::SwA];
+    #elif RC_SW_B
+    PRINT(F("RC_SW_B no\n"));
+    switches[1] = rc_raw[(uint8_t)cfg::rx::k_Ch::SwB];
+    #elif RC_SW_AB
+    rx::SplitChannel(rc_raw[(uint8_t)cfg::rx::k_Ch::SwAB], switches[0], 2, switches[1], 2);
+    #endif
+
+    #if RC_SW_C
+    PRINT(F("RC_SW_C no\n"));
+    switches[2] = rc_raw[(uint8_t)cfg::rx::k_Ch::SwC];
+    #elif RC_SW_D
+    PRINT(F("RC_SW_D no\n"));
+    switches[3] = rc_raw[(uint8_t)cfg::rx::k_Ch::SwD];
+    #elif RC_SW_CD
+    rx::SplitChannel(rc_raw[(uint8_t)cfg::rx::k_Ch::SwCD], switches[2], 3, switches[3], 2);
+    #endif
+
+    #if PRINT_RC_SWITCHES_STATE
+    PRINT(F("a ")); PRINT(switches[0]); PRINT(F("\tb ")); PRINT(switches[1]);
+    PRINT(F("\tc ")); PRINT(switches[2]); PRINT(F("\td ")); PRINT(switches[3]);
+    PRINT(F("\n"));
+    #endif
+
+
+    static int16_t vr_a_last = rc_raw[(uint8_t)cfg::rx::k_Ch::VrA];
+    static int16_t vr_b_last = rc_raw[(uint8_t)cfg::rx::k_Ch::VrB];
+
+    int16_t vr_a_diff = rc_raw[(uint8_t)cfg::rx::k_Ch::VrA] - vr_a_last;
+    int16_t vr_b_diff = rc_raw[(uint8_t)cfg::rx::k_Ch::VrB] - vr_b_last;
+
+    #if PRINT_RC_POTENTIOMETERS
+    PRINT(F("vrA: ")); PRINT(rc_raw[(uint8_t)cfg::rx::k_Ch::VrA]); PRINT(F("\n"));
+    PRINT(F("a_last: ")); PRINT(vr_a_last); PRINT(F("\n"));
+    PRINT(F("a_diff: ")); PRINT(vr_a_diff); PRINT(F("\n"));
+    #endif
+
+
+    uint16_t sw_map = rx::CombineChannels(switches, 4);
+    static uint16_t rc_state_last = sw_map;
+    bool change = false;
+    if (sw_map != rc_state_last) {
+      rc_state_last = sw_map;
+      change = true;
+    }
+
+    #if PRINT_RC_SWITCHES_MASK
+    PRINT(sw_map); PRINT(F("\n"));
+    for (uint8_t sw = 0; sw < 4; ++sw) {
+      for (uint8_t st = 0; st < 3; ++st) {
+        if (((sw_map >> (st + (3 * sw))) & 1) == 1) {
+          PRINT(sw+1); PRINT(st+1); PRINT(F(" "));
+        }
+      }
+    }
+    PRINT(F("\n"));
+    #endif
+    
+    if ((sw_map & cfg::rx::switch_state::flight_mode::angle) == cfg::rx::switch_state::flight_mode::angle) {
+      if (change) {
+        PRINT(F("RC_ST_FM_ANGLE\n"));
+      }
+
+      g_flight_mode = k_FlightMode::Angle;
+      status::communication = k_Status::normal;
+
+      g_rx_state.pitch = rc_raw[(uint8_t)cfg::rx::k_Ch::Pitch]
+        / cfg::rx::div::angle_tilt;
+      g_rx_state.roll = rc_raw[(uint8_t)cfg::rx::k_Ch::Roll]
+        / cfg::rx::div::angle_tilt;
+      g_rx_state.yaw = rc_raw[(uint8_t)cfg::rx::k_Ch::Yaw]
+        / cfg::rx::div::rate_yaw;
+    }
+
+    if ((sw_map & cfg::rx::switch_state::flight_mode::acro) == cfg::rx::switch_state::flight_mode::acro) {
+      if (change) {
+        PRINT(F("RC_ST_FM_ACRO\n"));
+      }
+
+      g_flight_mode = k_FlightMode::Acro;
+      status::communication = k_Status::normal;
+
+      g_rx_state.pitch = rc_raw[(uint8_t)cfg::rx::k_Ch::Pitch]
+        / cfg::rx::div::rate_tilt;
+      g_rx_state.roll = rc_raw[(uint8_t)cfg::rx::k_Ch::Roll]
+        / cfg::rx::div::rate_tilt;
+      g_rx_state.yaw = rc_raw[(uint8_t)cfg::rx::k_Ch::Yaw]
+        / cfg::rx::div::rate_yaw;
+    }
+
+    if ((sw_map & cfg::rx::switch_state::flight_mode::direct) == cfg::rx::switch_state::flight_mode::direct) {
+      if (change) {
+        PRINT(F("RC_ST_FM_DIRECT\n"));
+      }
+
+        g_flight_mode = k_FlightMode::Direct;
+        status::communication = k_Status::error;
+
+        g_rx_state.pitch = rc_raw[(uint8_t)cfg::rx::k_Ch::Pitch]
+          / cfg::rx::div::tilt;
+        g_rx_state.roll = rc_raw[(uint8_t)cfg::rx::k_Ch::Roll]
+          / cfg::rx::div::tilt;
+        g_rx_state.yaw = rc_raw[(uint8_t)cfg::rx::k_Ch::Yaw]
+          / cfg::rx::div::yaw;
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::lights) == cfg::rx::switch_state::cfg::lights) {
+      if (change) {
+        PRINT(F("RC_CFG_LIGHTS\n"));
+      }
+
+      if (vr_a_diff > cfg::rx::pot_step) {
+        // inc arms LEDs
+        vr_a_last = rc_raw[(uint8_t)cfg::rx::k_Ch::VrA];
+        PRINT(F("inc arms LEDs\n"));
+
+      } else if (vr_a_diff < -cfg::rx::pot_step) {
+        // dec arms LEDs
+        vr_a_last = rc_raw[(uint8_t)cfg::rx::k_Ch::VrA];
+        PRINT(F("dec arms LEDs\n"));
+
+      }
+
+      if (vr_b_diff > cfg::rx::pot_step) {
+        // inc lamp
+        vr_b_last = rc_raw[(uint8_t)cfg::rx::k_Ch::VrB];
+        PRINT(F("inc lamp\n"));
+
+      } else if (vr_b_diff < -cfg::rx::pot_step) {
+        // dec lamp
+        vr_b_last = rc_raw[(uint8_t)cfg::rx::k_Ch::VrB];
+        PRINT(F("dec lamp\n"));
+
+      }
+    }
+
+    if ((sw_map & cfg::rx::switch_state::calibration::accel) == cfg::rx::switch_state::calibration::accel) {
+      if (change) {
+        PRINT(F("RC_ST_CAL_ACCEL\n"));
+      }
+
+      static uint8_t calib_accel_div = 0;
+      ++calib_accel_div;
+      if (calib_accel_div > 10) {
+        calib_accel_div = 0;
+
+        if (g_rx_state.throttle > 2 && g_flight_mode == k_FlightMode::Angle) {
+          #if defined(IMU_MPU6050)
+          cfg::imu::offset::accel[1] -= (g_rx_state.pitch / 5);
+          imu::g_mpu.setYAccelOffset(cfg::imu::offset::accel[1]);
+          cfg::imu::offset::accel[0] += (g_rx_state.roll / 5);
+          imu::g_mpu.setXAccelOffset(cfg::imu::offset::accel[0]);
+          #elif defined(IMU_MPU925x)
+          cfg::imu::offset::accel[1] += (g_rx_state.pitch / 5);
+          imu::g_mpu.setYAccelOffset(cfg::imu::offset::accel[1]);
+          cfg::imu::offset::accel[0] -= (g_rx_state.roll / 5);
+          imu::g_mpu.setXAccelOffset(cfg::imu::offset::accel[0]);
+          #endif
+        }
+        PRINT(F("xa: ")); PRINT(cfg::imu::offset::accel[0]);
+        PRINT(F("\n"));
+        PRINT(F("ya: ")); PRINT(cfg::imu::offset::accel[1]);
+        PRINT(F("\n\n"));
+      } // calib_div
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::accel_lpf) == cfg::rx::switch_state::cfg::accel_lpf) {
+      if (change) {
+        PRINT(F("RC_CFG_ACCEL_LPF\n"));
+      }
+      
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::mahony) == cfg::rx::switch_state::cfg::mahony) {
+      if (change) {
+        PRINT(F("RC_CFG_MAHONY\n"));
+      }
+      
+    }
+
+    if ((sw_map & cfg::rx::switch_state::calibration::gyro) == cfg::rx::switch_state::calibration::gyro) {
+      if (change) {
+        PRINT(F("RC_ST_CAL_GYRO\n"));
+      }
+
+      if (g_rx_state.throttle < 40 && g_flight_mode == k_FlightMode::Acro) {
+        static float gyroBuff[3][3] = {0};
+        static int8_t gyroBuff_ndx = -1;
+
+        ++gyroBuff_ndx;
+        if (gyroBuff_ndx < 3) {
+          gyroBuff[gyroBuff_ndx][0] = g_angular_velocity.x;
+          gyroBuff[gyroBuff_ndx][1] = g_angular_velocity.y;
+          gyroBuff[gyroBuff_ndx][2] = g_angular_velocity.z;
+        } else {
+          gyroBuff_ndx = 0;
+
+          float x = 0;
+          float y = 0;
+          float z = 0;
+          for (uint8_t i = 0; i < 3; ++i) {
+            x += gyroBuff[i][0];
+            y += gyroBuff[i][1];
+            z += gyroBuff[i][2];
+          }
+          x /= 3;
+          y /= 3;
+          z /= 3;
+          PRINT(F("avg: "));
+          PRINT(x); PRINT(F(", "));
+          PRINT(y); PRINT(F(", "));
+          PRINT(z); PRINT(F("\n"));
+
+          if (x < -0.05) {
+            cfg::imu::offset::gyro[0] += 1;
+            imu::g_mpu.setXGyroOffset(cfg::imu::offset::gyro[0]);
+            PRINT(F("inc x\n"));
+          } else if (x > 0.05) {
+            cfg::imu::offset::gyro[0] -= 1;
+            imu::g_mpu.setXGyroOffset(cfg::imu::offset::gyro[0]);
+            PRINT(F("dec x\n"));
+          }
+          if (y < -0.05) {
+            cfg::imu::offset::gyro[1] += 1;
+            imu::g_mpu.setYGyroOffset(cfg::imu::offset::gyro[1]);
+            PRINT(F("inc y\n"));
+          } else if (y > 0.05) {
+            cfg::imu::offset::gyro[1] -= 1;
+            imu::g_mpu.setYGyroOffset(cfg::imu::offset::gyro[1]);
+            PRINT(F("dec y\n"));
+          }
+          if (z < -0.05) {
+            cfg::imu::offset::gyro[2] += 1;
+            imu::g_mpu.setZGyroOffset(cfg::imu::offset::gyro[2]);
+            PRINT(F("inc z\n"));
+          } else if (z > 0.05) {
+            cfg::imu::offset::gyro[2] -= 1;
+            imu::g_mpu.setZGyroOffset(cfg::imu::offset::gyro[2]);
+            PRINT(F("dec z\n"));
+          }
+          PRINT(F("offsets: "));
+          PRINT(cfg::imu::offset::gyro[0]); PRINT(F(", "));
+          PRINT(cfg::imu::offset::gyro[1]); PRINT(F(", "));
+          PRINT(cfg::imu::offset::gyro[2]);
+          PRINT(F("\n"));
+        }
+      }
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::imu_lpf) == cfg::rx::switch_state::cfg::imu_lpf) {
+      if (change) {
+        PRINT(F("RC_CFG_IMU_LPF\n"));
+      }
+      
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::angle_p) == cfg::rx::switch_state::cfg::angle_p) {
+      if (change) {
+        PRINT(F("RC_CFG_ANGLE_P\n"));
+      }
+      
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::angle_i) == cfg::rx::switch_state::cfg::angle_i) {
+      if (change) {
+        PRINT(F("RC_CFG_ANGLE_I\n"));
+      }
+      
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::rate_p) == cfg::rx::switch_state::cfg::rate_p) {
+      if (change) {
+        PRINT(F("RC_CFG_RATE_P\n"));
+      }
+      
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::rate_d) == cfg::rx::switch_state::cfg::rate_d) {
+      if (change) {
+        PRINT(F("RC_CFG_RATE_D\n"));
+      }
+      
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::yaw_rate_p) == cfg::rx::switch_state::cfg::yaw_rate_p) {
+      if (change) {
+        PRINT(F("RC_CFG_YAW_P\n"));
+      }
+      
+    }
+
+    if ((sw_map & cfg::rx::switch_state::cfg::yaw_rate_i) == cfg::rx::switch_state::cfg::yaw_rate_i) {
+      if (change) {
+        PRINT(F("RC_CFG_YAW_I\n"));
+      }
+      
+    }
+
+
+
+    static k_FlightMode flight_mode_last = k_FlightMode::Angle;
+    if (flight_mode_last != g_flight_mode) {
+      flight_mode_last = g_flight_mode;
+      indication::arms(3);
+    }
+
+
+    #if PRINT_RC
+    PRINT(F("t: ")); PRINT(g_rx_state.throttle);
+    PRINT(F(" p: ")); PRINT(g_rx_state.pitch);
+    PRINT(F(" r: ")); PRINT(g_rx_state.roll);
+    PRINT(F(" y: ")); PRINT(g_rx_state.yaw);
+    PRINT(F(" fm: ")); PRINT((uint8_t)g_flight_mode);
+    PRINT(F("\n"));
+    #endif
+  }
+  // ~RC
+
+
+  if (g_flight_mode == k_FlightMode::Angle) {
+    ctlr::att::angle::pitch.setMode(AUTOMATIC);
+    ctlr::att::angle::roll.setMode(AUTOMATIC);
+
+    ctlr::att::rate::pitch.setMode(AUTOMATIC);
+    ctlr::att::rate::roll.setMode(AUTOMATIC);
+    ctlr::att::rate::yaw.setMode(AUTOMATIC);
+
+  } else if (g_flight_mode == k_FlightMode::Acro) {
+    ctlr::att::angle::pitch.setMode(MANUAL);
+    ctlr::att::angle::roll.setMode(MANUAL);
+
+    ctlr::att::rate::pitch.setMode(AUTOMATIC);
+    ctlr::att::rate::roll.setMode(AUTOMATIC);
+    ctlr::att::rate::yaw.setMode(AUTOMATIC);
+
+    ctlr::att::rate::sp::pitch = g_rx_state.pitch;
+    ctlr::att::rate::sp::roll = g_rx_state.roll;
+
+  } else if (g_flight_mode == k_FlightMode::Direct) {
+    ctlr::att::angle::pitch.setMode(MANUAL);
+    ctlr::att::angle::roll.setMode(MANUAL);
+
+    ctlr::att::rate::pitch.setMode(MANUAL);
+    ctlr::att::rate::roll.setMode(MANUAL);
+    ctlr::att::rate::yaw.setMode(MANUAL);
+
+    ctlr::att::rate::output::pitch = g_rx_state.pitch;
+    ctlr::att::rate::output::roll = g_rx_state.roll;
+    ctlr::att::rate::output::yaw = g_rx_state.yaw;
+
+  } else {
+    // ctlr::att::rate::pitch.off();
+    // ctlr::att::rate::roll.off();
+    // ctlr::att::angle::pitch.off();
+    // ctlr::att::angle::roll.off();
+  }
 
 } //void loop()
-
-
-void handleCommand() {
-  switch (config::communication::telemetry::type()) {
-  case 0:
-    comm::rf24.setResponse(nullptr, sizeof(nullptr));
-    break;
-  case 1:
-    static Telemetry telemetry;
-    telemetry._type = PacketType::Telemetry;
-    telemetry.batteryVoltage = batteryVoltage;
-    telemetry.altitude = relativeAltitude;
-    comm::rf24.setResponse(&telemetry, sizeof(telemetry));
-    break;
-  case 2:
-    static Telemetry_regulation telemetry_regulation;
-    telemetry_regulation._type = PacketType::Telemetry_regulation;
-    telemetry_regulation.batteryVoltage = batteryVoltage;
-    telemetry_regulation.commandRoll = command.roll;
-    telemetry_regulation.avRoll = angularVelocity.y;
-    telemetry_regulation.attitudeRoll = attitude.roll;
-    comm::rf24.setResponse(&telemetry_regulation, sizeof(telemetry_regulation));
-    break;
-  case 3:
-    static Telemetry_imu telemetry_imu;
-    telemetry_imu._type = PacketType::Telemetry_imu;
-    telemetry_imu.angularVelocity.x = angularVelocity.x;
-    telemetry_imu.angularVelocity.y = angularVelocity.y;
-    telemetry_imu.angularVelocity.z = angularVelocity.z;
-    telemetry_imu.acceleration.x = acceleration.x;
-    telemetry_imu.acceleration.y = acceleration.y;
-    telemetry_imu.acceleration.z = acceleration.z;
-    telemetry_imu.attitude.pitch = attitude.pitch;
-    telemetry_imu.attitude.roll = attitude.roll;
-    telemetry_imu.batteryVoltage = batteryVoltage;
-    comm::rf24.setResponse(&telemetry_imu, sizeof(telemetry_imu));
-    break;
-  case 4:
-    static Telemetry_motors telemetry_motors;
-    telemetry_motors._type = PacketType::Telemetry_motors;
-    telemetry_motors.tl = OCR0B;
-    telemetry_motors.tr = OCR1B;
-    telemetry_motors.bl = OCR0A;
-    telemetry_motors.br = OCR1A;
-    telemetry_motors.batteryVoltage = batteryVoltage;
-    comm::rf24.setResponse(&telemetry_motors, sizeof(telemetry_motors));
-    break;
-  default: break;
-  }
-
-  static uint8_t senderId = command.senderId;
-  if (command.senderId != senderId
-      || command.throttle < 0 || command.throttle > 127
-      || command.pitch < -200 || command.pitch > 200
-      || command.roll < -200 || command.roll > 200) {
-    OCR0B = 0;
-    OCR1B = 0;
-    OCR0A = 0;
-    OCR1A = 0;
-    throttle = 0;
-    command.pitch = 0;
-    command.roll = 0;
-    command.yaw = 0;
-    command.flightMode = FlightMode::stabilize;
-  } else {
-    if (command.flightMode == FlightMode::stabilize) {
-      ctlr::att::angle::pitch.setMode(AUTOMATIC);
-      ctlr::att::angle::roll.setMode(AUTOMATIC);
-    } else if (command.flightMode == FlightMode::acro) {
-      ctlr::att::angle::pitch.setMode(MANUAL);
-      ctlr::att::angle::roll.setMode(MANUAL);
-      ctlr::att::rate::setpoint::pitch = command.pitch;
-      ctlr::att::rate::setpoint::roll = command.roll;
-    } else {
-      ctlr::att::rate::pitch.off();
-      ctlr::att::rate::roll.off();
-      ctlr::att::angle::pitch.off();
-      ctlr::att::angle::roll.off();
-    }
-    throttle = command.throttle;
-    status::communication = Status::normal;
-  }
-}
-
-void handleSetting(Setting & setting) {
-  setting.success = true;
-  switch (setting.id) {
-  case SettingId::dummy:
-    setting.success = false;
-    DEBUGLN("dummy");
-    break;
-
-  case SettingId::commTelemetry_type:
-    if (setting.request) {
-      DEBUGLN("?Tmt");
-      setting.value = (float)config::communication::telemetry::type();
-    } else {
-      setting.success = config::communication::telemetry::type.changeValue(setting.value);
-      setting.value = (float)config::communication::telemetry::type();
-      DEBUG("Tmt>"); DEBUGLN(setting.value);
-    }
-    break;
-
-  case SettingId::regInner_p:
-    if (setting.request) {
-      DEBUGLN("?Pi");
-      setting.value = config::ctlr::att::rate::P();
-    } else {
-      setting.success = config::ctlr::att::rate::P.changeValue(setting.value);
-      setting.value = config::ctlr::att::rate::P();
-      ctlr::att::rate::pitch.setTunings(setting.value);
-      ctlr::att::rate::roll.setTunings(setting.value);
-      DEBUG("Pi>"); DEBUGLN(setting.value);
-    }
-    break;
-  case SettingId::regInner_yawP:
-    if (setting.request) {
-      DEBUGLN("?Pi_yaw");
-      setting.value = config::ctlr::att::rate::yawP();
-    } else {
-      setting.success = config::ctlr::att::rate::yawP.changeValue(setting.value);
-      setting.value = config::ctlr::att::rate::yawP();
-      ctlr::att::rate::yaw.setTunings(setting.value);
-      DEBUG("Pi_yaw>"); DEBUGLN(setting.value);
-    }
-    break;
-  case SettingId::regOuter_p:
-    if (setting.request) {
-      DEBUGLN("?Po");
-      setting.value = config::ctlr::att::angle::P();
-    } else {
-      setting.success = config::ctlr::att::angle::P.changeValue(setting.value);
-      setting.value = config::ctlr::att::angle::P();
-      ctlr::att::angle::pitch.setTunings(setting.value, config::ctlr::att::angle::I());
-      ctlr::att::angle::roll.setTunings(setting.value, config::ctlr::att::angle::I());
-      DEBUG("Po>"); DEBUGLN(setting.value);
-    }
-    break;
-  case SettingId::regOuter_i:
-    if (setting.request) {
-      DEBUGLN("?Io");
-      setting.value = config::ctlr::att::angle::I();
-    } else {
-      setting.success = config::ctlr::att::angle::I.changeValue(setting.value);
-      setting.value = config::ctlr::att::angle::I();
-      ctlr::att::angle::pitch.setTunings(config::ctlr::att::angle::P(), setting.value);
-      ctlr::att::angle::roll.setTunings(config::ctlr::att::angle::P(), setting.value);
-      DEBUG("Io>"); DEBUGLN(setting.value);
-    }
-    break;
-
-  case SettingId::indication_armsLevel:
-    if (setting.request) {
-      DEBUGLN("?Arms lvl");
-      setting.value = (float)config::indication::armsLevel();
-    } else {
-      setting.success = config::indication::armsLevel.changeValue(setting.value);
-      setting.value = (float)config::indication::armsLevel();
-      DEBUG("Arms lvl>"); DEBUGLN(setting.value);
-    }
-    break;
-  case SettingId::indication_lamp:
-    if (setting.request) {
-      DEBUGLN("?Lamp");
-      setting.value = (float)config::indication::lamp();
-    } else {
-      setting.success = config::indication::lamp.changeValue(setting.value);
-      setting.value = (float)config::indication::lamp();
-      indication::lamp(config::indication::lamp());
-      DEBUG("Lamp>"); DEBUGLN(setting.value);
-    }
-    break;
-
-  default:
-    setting.success = false;
-    DEBUG("Unrec sId: "); DEBUGLN((uint8_t)setting.id);
-    break;
-  } //switch (setting.id)
-  comm::rf24.setResponse(&setting, sizeof(setting));
-}

@@ -1,7 +1,9 @@
 #pragma once
-#include <inttypes.h>
+#include <stdint.h>
 #include <math.h>
 
+
+namespace util {
 
 extern const float toDegrees;
 extern const uint8_t expMap[];
@@ -18,15 +20,10 @@ template <typename T> int sign(T val) {
 	return (T(0) < val) - (val < T(0));
 }
 
-enum State : uint8_t {
-	ON = 1, OFF = 0, FULL_ON = 255, HALF_ON = 127,
-};
-
-enum class Status {
-	normal, warning, error,
-};
-
 float calculateAltitude(float pressure, float relativeToPressure,
                         float temperature=0);
 
-float middle_of_3(float a, float b, float c);
+int16_t Median(int16_t a, int16_t b, int16_t c);
+float Median(float a, float b, float c);
+
+} // namespace util

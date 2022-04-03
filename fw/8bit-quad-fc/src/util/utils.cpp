@@ -1,6 +1,8 @@
 #include "utils.hpp"
 
 
+namespace util {
+
 const float toDegrees = 57.29577951308232087679815481410517033240547246656432154916;
 const uint8_t expMap[] = {0, 1, 2, 3, 5, 9, 15, 24, 39, 63, 101, 160, 254};
 
@@ -28,7 +30,21 @@ float calculateAltitude(float pressure, float relativeToPressure,
 	// return 44330 * (1.0 - pow(pressure / relativeToPressure, 0.1903));
 }
 
-float middle_of_3(float a, float b, float c) {
+int16_t Median(int16_t a, int16_t b, int16_t c) {
+  int16_t middle;
+
+  if ((a <= b) && (a <= c)) {
+    middle = (b <= c) ? b : c;
+  } else if ((b <= a) && (b <= c)) {
+    middle = (a <= c) ? a : c;
+  } else {
+    middle = (a <= b) ? a : b;
+  }
+  
+  return middle;
+}
+
+float Median(float a, float b, float c) {
 	float middle;
 
 	if ((a <= b) && (a <= c)) {
@@ -38,6 +54,8 @@ float middle_of_3(float a, float b, float c) {
 	} else {
 		middle = (a <= b) ? a : b;
 	}
-
+	
 	return middle;
 }
+
+} // namespace util

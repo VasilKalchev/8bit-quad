@@ -1,5 +1,6 @@
 #pragma once
-#include <inttypes.h>
+
+#include <stdint.h>
 
 #include <avr/io.h>
 #include <Arduino.h>
@@ -45,10 +46,12 @@ namespace ino {
 const uint8_t ce = 7;
 const uint8_t csn = 8;
 const uint8_t interrupt = A0;
+const uint8_t ppm = 2;
 } //namespace ino
 const uint8_t ce = PD7;
 const uint8_t csn = PB0;
 const uint8_t interrupt = PC0;
+const uint8_t ppm = PD2;
 }
 
 namespace imu {

@@ -53,11 +53,12 @@ MPU6050::MPU6050(uint8_t address):devAddr(address) {
  * the clock source to use the X Gyro for reference, which is slightly better than
  * the default internal clock source.
  */
-void MPU6050::initialize() {
+bool MPU6050::initialize() {
     setClockSource(MPU6050_CLOCK_PLL_XGYRO);
     setFullScaleGyroRange(MPU6050_GYRO_FS_250);
     setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
     setSleepEnabled(false); // thanks to Jack Elston for pointing this one out!
+    return true;
 }
 
 /** Verify the I2C connection.
@@ -1782,14 +1783,18 @@ void MPU6050::getMotion9(int16_t* ax, int16_t* ay, int16_t* az, int16_t* gx, int
  * @see getRotation()
  * @see MPU6050_RA_ACCEL_XOUT_H
  */
-void MPU6050::getMotion6(int16_t* ax, int16_t* ay, int16_t* az, int16_t* gx, int16_t* gy, int16_t* gz) {
-    I2Cdev::readBytes(devAddr, MPU6050_RA_ACCEL_XOUT_H, 14, buffer);
-    *ax = (((int16_t)buffer[0]) << 8) | buffer[1];
-    *ay = (((int16_t)buffer[2]) << 8) | buffer[3];
-    *az = (((int16_t)buffer[4]) << 8) | buffer[5];
-    *gx = (((int16_t)buffer[8]) << 8) | buffer[9];
-    *gy = (((int16_t)buffer[10]) << 8) | buffer[11];
-    *gz = (((int16_t)buffer[12]) << 8) | buffer[13];
+bool MPU6050::getMotion6(int16_t* ax, int16_t* ay, int16_t* az, int16_t* gx, int16_t* gy, int16_t* gz) {
+    if (I2Cdev::readBytes(devAddr, MPU6050_RA_ACCEL_XOUT_H, 14, buffer)) {
+        *ax = (((int16_t)buffer[0]) << 8) | buffer[1];
+        *ay = (((int16_t)buffer[2]) << 8) | buffer[3];
+        *az = (((int16_t)buffer[4]) << 8) | buffer[5];
+        *gx = (((int16_t)buffer[8]) << 8) | buffer[9];
+        *gy = (((int16_t)buffer[10]) << 8) | buffer[11];
+        *gz = (((int16_t)buffer[12]) << 8) | buffer[13];
+        return true;
+    } else {
+        return false;
+    }
 }
 /** Get 3-axis accelerometer readings.
  * These registers store the most recent accelerometer measurements.
@@ -2850,9 +2855,9 @@ int16_t MPU6050::getXAccelOffset() {
 	I2Cdev::readBytes(devAddr, SaveAddress, 2, buffer);
 	return (((int16_t)buffer[0]) << 8) | buffer[1];
 }
-void MPU6050::setXAccelOffset(int16_t offset) {
+bool MPU6050::setXAccelOffset(int16_t offset) {
 	uint8_t SaveAddress = ((getDeviceID() < 0x38 )? MPU6050_RA_XA_OFFS_H:0x77); // MPU6050,MPU9150 Vs MPU6500,MPU9250
-	I2Cdev::writeWord(devAddr, SaveAddress, offset);
+	return I2Cdev::writeWord(devAddr, SaveAddress, offset);
 }
 
 // YA_OFFS_* register
@@ -2862,9 +2867,9 @@ int16_t MPU6050::getYAccelOffset() {
 	I2Cdev::readBytes(devAddr, SaveAddress, 2, buffer);
 	return (((int16_t)buffer[0]) << 8) | buffer[1];
 }
-void MPU6050::setYAccelOffset(int16_t offset) {
+bool MPU6050::setYAccelOffset(int16_t offset) {
 	uint8_t SaveAddress = ((getDeviceID() < 0x38 )? MPU6050_RA_YA_OFFS_H:0x7A); // MPU6050,MPU9150 Vs MPU6500,MPU9250
-	I2Cdev::writeWord(devAddr, SaveAddress, offset);
+	return I2Cdev::writeWord(devAddr, SaveAddress, offset);
 }
 
 // ZA_OFFS_* register
@@ -2874,9 +2879,9 @@ int16_t MPU6050::getZAccelOffset() {
 	I2Cdev::readBytes(devAddr, SaveAddress, 2, buffer);
 	return (((int16_t)buffer[0]) << 8) | buffer[1];
 }
-void MPU6050::setZAccelOffset(int16_t offset) {
+bool MPU6050::setZAccelOffset(int16_t offset) {
 	uint8_t SaveAddress = ((getDeviceID() < 0x38 )? MPU6050_RA_ZA_OFFS_H:0x7D); // MPU6050,MPU9150 Vs MPU6500,MPU9250
-	I2Cdev::writeWord(devAddr, SaveAddress, offset);
+	return I2Cdev::writeWord(devAddr, SaveAddress, offset);
 }
 
 // XG_OFFS_USR* registers
@@ -2885,8 +2890,8 @@ int16_t MPU6050::getXGyroOffset() {
     I2Cdev::readBytes(devAddr, MPU6050_RA_XG_OFFS_USRH, 2, buffer);
     return (((int16_t)buffer[0]) << 8) | buffer[1];
 }
-void MPU6050::setXGyroOffset(int16_t offset) {
-    I2Cdev::writeWord(devAddr, MPU6050_RA_XG_OFFS_USRH, offset);
+bool MPU6050::setXGyroOffset(int16_t offset) {
+    return I2Cdev::writeWord(devAddr, MPU6050_RA_XG_OFFS_USRH, offset);
 }
 
 // YG_OFFS_USR* register
@@ -2895,8 +2900,8 @@ int16_t MPU6050::getYGyroOffset() {
     I2Cdev::readBytes(devAddr, MPU6050_RA_YG_OFFS_USRH, 2, buffer);
     return (((int16_t)buffer[0]) << 8) | buffer[1];
 }
-void MPU6050::setYGyroOffset(int16_t offset) {
-    I2Cdev::writeWord(devAddr, MPU6050_RA_YG_OFFS_USRH, offset);
+bool MPU6050::setYGyroOffset(int16_t offset) {
+    return I2Cdev::writeWord(devAddr, MPU6050_RA_YG_OFFS_USRH, offset);
 }
 
 // ZG_OFFS_USR* register
@@ -2905,8 +2910,8 @@ int16_t MPU6050::getZGyroOffset() {
     I2Cdev::readBytes(devAddr, MPU6050_RA_ZG_OFFS_USRH, 2, buffer);
     return (((int16_t)buffer[0]) << 8) | buffer[1];
 }
-void MPU6050::setZGyroOffset(int16_t offset) {
-    I2Cdev::writeWord(devAddr, MPU6050_RA_ZG_OFFS_USRH, offset);
+bool MPU6050::setZGyroOffset(int16_t offset) {
+    return I2Cdev::writeWord(devAddr, MPU6050_RA_ZG_OFFS_USRH, offset);
 }
 
 // INT_ENABLE register (DMP functions)

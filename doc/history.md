@@ -45,10 +45,8 @@ gitGraph
    commit id: "cycle scheduler, SD black box" tag: "2021-03-25"
    checkout main
    commit id: "imu-read-status" tag: "2021-04-03"
+   commit id: "ppm-rework" tag: "2022-04-03"
 ```
-
-`ppm-rework` (2021-12-20 to 2022-04-03) belongs on `main` after
-`imu-read-status` and is not committed yet.
 
 Only `nrf24-baseline` and `ppm-rework` are complete, working firmware.
 `board-rebrand` and `imu-read-status` are working stepping stones between
@@ -89,11 +87,13 @@ for almost three years, 2021-03 to 2021-04, then eight months of nothing, and
   original source this window also disabled altitude-hold and added a
   compile-time IMU selection macro, neither of which is carried here.
 - **`ppm-rework` (2021-12-20 .. 2022-04-03)** - the version that was actually
-  flown and iteratively tuned (documented in dated tuning notes at the time,
-  not reproduced in this repository, see the note below). Switched from the
-  nRF24 remote to a standard PPM receiver, dropped altitude-hold, upgraded the
-  rate loop to full PID with a D term, retimed the main loop and I2C clock.
-  This is the last known-working state.
+  flown, with its gains recorded in dated notes at the time that are not
+  reproduced in this repository, see the note below. Switched from the
+  nRF24 remote to a standard PPM receiver, which retires the transmitter and
+  everything shared with it. Dropped altitude-hold and the barometer, moved
+  configuration onto the RC switches, upgraded
+  the rate loop to full PID with a D term, went back to the MPU6050, retimed
+  the main loop and I2C clock. This is the last known-working state.
 
 ### Resolution of the 2021 rework
 
@@ -167,9 +167,10 @@ it was never touched again. The same unmodified copy sits in both the 2021 and
 2022 snapshots. Its `Communication.hpp` differs from the flight controller's
 2018 copy by a trailing newline only, so the wire protocol is shared exactly.
 
-The 2022 `ppm-rework` revision drops the nRF24 link from the flight controller,
-which leaves the transmitter with nothing to talk to. It is kept anyway, as the
-matching half of every earlier revision.
+`ppm-rework` drops the nRF24 link for a PPM receiver, so the transmitter has
+nothing left to talk to and no code left in common. It is removed at that
+commit rather than left in the tree as a dead half. The three earlier commits
+still carry it, complete and unchanged, which is where to find it.
 
 ## What's out of scope for this repository
 

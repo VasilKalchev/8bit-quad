@@ -138,3 +138,111 @@ firmware for the same reason.
   The source kept differentiating until the 2022 revision, where it made the
   same change; brought forward here rather than carrying a broken yaw rate
   through another revision.
+
+## 2022-04-03
+
+The last revision that flew. Written between 2021-12-20 and 2022-04-03,
+after eight months of nothing.
+
+- The nRF24L01+ link is replaced by a standard PPM receiver on `D2`. New
+  `src/rx/`: `ReadRx()` pulls eight channels, `SplitChannel()` decodes two
+  logical switches from one channel by value bracket, `CombineChannels()`
+  packs four 3-position switches into a 12-bit mask. `PPMReader` (GPL-3.0,
+  Aapo Nikkila / Dmitry Grigoryev) is vendored in the sketch rather than
+  with the core's libraries, which keeps it out of the distributed core
+  archive.
+- `fw/8bit-quad-rc` is removed. The wire protocol it exists for is gone, so
+  the transmitter has nothing to talk to and no shared code left. It is still
+  in the previous commits, unchanged since 2018.
+- Removed with it: `src/radio/`, `src/common/comm_packets.hpp` and the whole
+  `src/common/` folder, which only existed to be duplicated into `rc`.
+  `imu_types.hpp` moves to `src/imu/`.
+- Vendored libraries: dropped `RF24` (only `rc` and
+  `fw/tool/test-radio-link` used it), `MahonyAHRS` (the sketch now carries its own) and
+  `I2C-Sensor-Lib_iLib` (no barometer here). What is left is what the tree
+  builds against. All three are still in the earlier commits, and
+  `hardware-v1.0.0` is tagged there.
+- `fw/tool/test-radio-link` goes with the radio, for the same reason.
+- A third `direct` flight mode is in the code alongside `angle` and `acro`,
+  driving the motor mix outputs from the sticks with every PID in `MANUAL`.
+  It was a one-off test and was never flown.
+- Configuration moves onto the RC switches. Four 3-position switches encoded
+  across two PPM channels select flight mode, lights, accelerometer and gyro
+  calibration and eight tuning slots; two potentiometers supply the value.
+  The map is `cfg::rx::switch_state::*` in `src/config/config_rx.hpp`. Only
+  the two calibrations and the mode select are implemented; the tuning slots
+  print their name and do nothing.
+- In-flight offset trimming: with the accel-calibrate combo held, pitch/roll
+  stick nudges `setXAccelOffset`/`setYAccelOffset`; with the gyro combo held
+  and the throttle down, three-sample averages walk the gyro offsets toward
+  zero one count at a time.
+- Rate loop is full PID for pitch and roll, D at 0.07. It was P-only from
+  2018 until here. Angle loop stays PI.
+- Retimed: sub-cycle 2600 us so the rate loop runs at ~385 Hz (was 3100 us,
+  ~322 Hz), full cycle 10400 us, angle loop 10560 us (was 12406). The
+  sub-cycle map is now rc / battery + indication / quaternion to Euler /
+  angle controller.
+- I2C back up to 800 kHz, this time by `Wire.setClock()` alone with the
+  `TWBR` override removed, so it sticks.
+- The MPU6050 is the live IMU again, selected by `#define IMU_MPU6050`;
+  `MPU9255` is kept and buildable via `IMU_MPU925x`. The MPU6050 driver
+  returns to the tree, having been dropped in 2021-03-25.
+- Namespace `config::` renamed to `cfg::` throughout. File names are
+  unchanged, so `src/config/config.hpp` now opens `namespace cfg`.
+- The `EepromSetting<T>` framework is gone. Six PID gains are written and
+  read as raw floats at fixed addresses through `avr/eeprom.h`, each
+  validated against a hardcoded plausible range on read. `config.cpp` keeps
+  the full EEPROM map as a comment, including regions nothing uses yet.
+  `RESET_EEPROM_TO_DEFAULT` is `true` as found, which overwrites the stored
+  gains with the compiled-in ones at every boot.
+- Fusion: the sketch now carries its own copy of the class-based
+  `MahonyAHRS` (`src/fusion/MahonyAHRS.{cpp,h}`), which is what the 2018 code
+  had always assumed. It replaces both the unused C globals version that sat
+  there and the vendored library the call site had been adapted to. Sample
+  frequency 384 Hz, `twoKp` 0.65, `twoKi` 0.01.
+- The complementary filter is back as a live `#if` alternative to Mahony
+  (`ATTITUDE_FUSION_METHOD_COMPLEMENTARY`), and this time the config it needs
+  exists, so it compiles. Mahony is the selected one.
+- Altitude and the barometer are gone entirely: no BMP280 read, no relative
+  altitude, no telemetry to report it on.
+- Debug output moved from `uart::` to Arduino `Serial` at 2 Mbaud, behind the
+  same `PRINT()` macro. `src/util/debug.hpp` grows a per-topic switch list
+  and a `TIME_START`/`TIME_STOP` pair that buffers timings and dumps them in
+  batches.
+- `utils` moves into `namespace util`; `middle_of_3` becomes overloaded
+  `util::Median` for `int16_t` and `float`.
+- Local edits to the vendored libraries, found in the snapshot and never
+  committed upstream:
+  - `MPU6050`: `initialize()`, `getMotion6()` and the six offset setters
+    return `bool` instead of `void`, so I2C failures reach the caller. This
+    is what the sketch's new zero-read and read-failure counters need, and
+    it mirrors what `MPU9255::getMotion()` got in the previous commit.
+  - `MPU6050`: `I2Cdev` switched from `I2CDEV_BUILTIN_FASTWIRE` to
+    `I2CDEV_ARDUINO_WIRE`, which is why `setup()` now calls `Wire.begin()`.
+  - `UART_atmega328`: gains `available()`, and `read()` no longer blocks
+    waiting for a byte.
+- `fw/tool`: `calib-imu` and `trim-imu` updated to this revision's copies.
+  Added `test-motors` (ramps the four motors), `bench-motor` (an off-board
+  single-motor rig with an LCD, a pot, a kill switch and ESC voltage
+  readout, needs `LiquidCrystal I2C` from Library Manager) and
+  `calib-balance` (RC-driven IMU calibration, ESC range and per-motor RMS
+  acceleration for balancing props).
+- Fixed one build error in the snapshot: `readBatteryVoltage()` cast to
+  `float32_t`, which nothing defines. The cast was `float` until 2022-02-25
+  and the file was not compiled again after that edit.
+- Not carried: `src/obsolete.cpp`, 412 lines of commented-out fragments that
+  would not compile as a translation unit; `cfg/cfg_ctrlr.hpp` and
+  `cfg/cfg_imu.hpp`, declaration-only stubs of a config split that was never
+  finished and never included; a stale duplicate `src/board/` from an earlier
+  move; and `IMU_zero (dep)`, the author's own name for the bench sketch that
+  `calib-imu` had already replaced.
+- IMU calibration sweeps pasted into `MPU6050.cpp`, `MPU9255.cpp`,
+  `config.cpp` and `trim-imu` are omitted, as in the earlier revisions. The
+  datasheet tables in the same comment blocks are kept.
+- Two wish lists that sat at the top of `8bit-quad-fc.ino` and
+  `fw/tool/bench-motor` are not carried. They were the first thing either file
+  showed and none of it was started; the notable entry is that there is still
+  no arm/disarm.
+- `gallery/`: thirteen photos from this revision's window, the last of them
+  taken 2022-12-10, eight months after the code stopped. The contact sheet is
+  regenerated to include them.

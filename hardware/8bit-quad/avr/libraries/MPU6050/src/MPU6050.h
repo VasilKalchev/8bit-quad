@@ -439,7 +439,7 @@ class MPU6050 {
     public:
         MPU6050(uint8_t address=MPU6050_DEFAULT_ADDRESS);
 
-        void initialize();
+        bool initialize();
         bool testConnection();
 
         // AUX_VDDIO register
@@ -622,7 +622,7 @@ class MPU6050 {
 
         // ACCEL_*OUT_* registers
         void getMotion9(int16_t* ax, int16_t* ay, int16_t* az, int16_t* gx, int16_t* gy, int16_t* gz, int16_t* mx, int16_t* my, int16_t* mz);
-        void getMotion6(int16_t* ax, int16_t* ay, int16_t* az, int16_t* gx, int16_t* gy, int16_t* gz);
+        bool getMotion6(int16_t* ax, int16_t* ay, int16_t* az, int16_t* gx, int16_t* gy, int16_t* gz);
         void getAcceleration(int16_t* x, int16_t* y, int16_t* z);
         int16_t getAccelerationX();
         int16_t getAccelerationY();
@@ -753,27 +753,27 @@ class MPU6050 {
 
         // XA_OFFS_* registers
         int16_t getXAccelOffset();
-        void setXAccelOffset(int16_t offset);
+        bool setXAccelOffset(int16_t offset);
 
         // YA_OFFS_* register
         int16_t getYAccelOffset();
-        void setYAccelOffset(int16_t offset);
+        bool setYAccelOffset(int16_t offset);
 
         // ZA_OFFS_* register
         int16_t getZAccelOffset();
-        void setZAccelOffset(int16_t offset);
+        bool setZAccelOffset(int16_t offset);
 
         // XG_OFFS_USR* registers
         int16_t getXGyroOffset();
-        void setXGyroOffset(int16_t offset);
+        bool setXGyroOffset(int16_t offset);
 
         // YG_OFFS_USR* register
         int16_t getYGyroOffset();
-        void setYGyroOffset(int16_t offset);
+        bool setYGyroOffset(int16_t offset);
 
         // ZG_OFFS_USR* register
         int16_t getZGyroOffset();
-        void setZGyroOffset(int16_t offset);
+        bool setZGyroOffset(int16_t offset);
         
         // INT_ENABLE register (DMP functions)
         bool getIntPLLReadyEnabled();
